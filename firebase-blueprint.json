@@ -1,0 +1,119 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated listener profile, visual customization, preferences, liked/followed IDs, and bounded listening stats.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string", "description": "Display name" },
+        "handle": { "type": "string", "description": "Listener handle starting with @" },
+        "email": { "type": "string", "description": "Verified account email" },
+        "initials": { "type": "string", "description": "Avatar monogram initials" },
+        "avatarUrl": { "type": "string", "description": "Profile picture URL or compressed data URI" },
+        "avatarStyle": { "type": "string", "enum": ["monogram", "obsidian-ring", "glass-emblem", "halo"] },
+        "accentColor": { "type": "string", "description": "Hex accent color" },
+        "favoriteGenres": { "type": "array", "items": { "type": "string" } },
+        "likedTrackIds": { "type": "array", "items": { "type": "string" } },
+        "followedArtistIds": { "type": "array", "items": { "type": "string" } },
+        "downloadedTrackIds": { "type": "array", "items": { "type": "string" } },
+        "activeDeviceId": { "type": "string" },
+        "hasCompletedOnboarding": { "type": "boolean" },
+        "preferences": { "type": "object", "description": "Audio, playback, notifications, and privacy toggles" },
+        "likedSongsCustomization": { "type": "object", "description": "Custom metadata and style for Liked Songs" },
+        "listeningStats": { "type": "object", "description": "Aggregated listening minutes, play counts, and streak state" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "handle", "email", "initials", "hasCompletedOnboarding", "createdAt", "updatedAt"]
+    },
+    "UserPlaylist": {
+      "title": "UserPlaylist",
+      "description": "User-created or Klyn AI Blend playlist owned by a single listener.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "title": { "type": "string" },
+        "curator": { "type": "string" },
+        "description": { "type": "string" },
+        "trackIds": { "type": "array", "items": { "type": "string" } },
+        "coverUrl": { "type": "string" },
+        "pinned": { "type": "boolean" },
+        "downloaded": { "type": "boolean" },
+        "accentGradient": { "type": "string" },
+        "displayMode": { "type": "string", "enum": ["comfortable", "compact"] },
+        "showQualityBadges": { "type": "boolean" },
+        "isAiBlend": { "type": "boolean" },
+        "blendMatchPct": { "type": "number" },
+        "sharedWithFriendId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "title", "trackIds", "createdAt", "updatedAt"]
+    },
+    "DownloadedTrack": {
+      "title": "DownloadedTrack",
+      "description": "Offline-saved track metadata synchronized to the listener's App Downloads.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "title": { "type": "string" },
+        "artist": { "type": "string" },
+        "album": { "type": "string" },
+        "duration": { "type": "number" },
+        "primaryColor": { "type": "string" },
+        "secondaryColor": { "type": "string" },
+        "genre": { "type": "string" },
+        "category": { "type": "string", "enum": ["Music", "Spatial", "Mixes"] },
+        "quality": { "type": "string", "enum": ["Dolby Atmos", "Hi-Res Lossless", "Lossless"] },
+        "coverUrl": { "type": "string" },
+        "fallbackGradient": { "type": "string" },
+        "playlistName": { "type": "string" },
+        "year": { "type": "number" },
+        "youtubeId": { "type": "string" },
+        "downloadedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "title", "artist", "album", "duration", "downloadedAt"]
+    },
+    "UserFriend": {
+      "title": "UserFriend",
+      "description": "Friend connection saved for Blend and Listen Party sessions.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "handle": { "type": "string" },
+        "initials": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "isFriend": { "type": "boolean" },
+        "tasteMatchPct": { "type": "number" },
+        "accentColor": { "type": "string" },
+        "lastActiveLabel": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "name", "handle", "initials", "isFriend", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Listener profile, customization, settings, and library indices."
+    },
+    "/users/{userId}/playlists/{playlistId}": {
+      "schema": { "$ref": "#/entities/UserPlaylist" },
+      "description": "Listener's personal and AI Blend playlists."
+    },
+    "/users/{userId}/downloads/{trackId}": {
+      "schema": { "$ref": "#/entities/DownloadedTrack" },
+      "description": "Offline App Downloads synchronized for the listener."
+    },
+    "/users/{userId}/friends/{friendId}": {
+      "schema": { "$ref": "#/entities/UserFriend" },
+      "description": "Listener's saved social friends for Listen Party and Blend."
+    }
+  }
+}

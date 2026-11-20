@@ -1,0 +1,239 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9._-]+$');
+    }
+
+    function isNonEmptyStr(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptionalStr(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isValidAvatarStyle(val) {
+      return val in ['monogram', 'obsidian-ring', 'glass-emblem', 'halo'];
+    }
+
+    function isValidDisplayMode(val) {
+      return val in ['comfortable', 'compact'];
+    }
+
+    function isValidTrackCategory(val) {
+      return val in ['Music', 'Spatial', 'Mixes'];
+    }
+
+    function isValidTrackQuality(val) {
+      return val in ['Dolby Atmos', 'Hi-Res Lossless', 'Lossless'];
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'name', 'handle', 'email', 'initials', 'hasCompletedOnboarding', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'name', 'handle', 'email', 'initials', 'avatarUrl', 'avatarStyle',
+          'accentColor', 'favoriteGenres', 'likedTrackIds', 'followedArtistIds',
+          'downloadedTrackIds', 'activeDeviceId', 'hasCompletedOnboarding',
+          'preferences', 'likedSongsCustomization', 'listeningStats',
+          'createdAt', 'updatedAt'
+        ])
+        && data.uid == userId
+        && isNonEmptyStr(data.name, 100)
+        && isNonEmptyStr(data.handle, 64)
+        && isNonEmptyStr(data.email, 200)
+        && isNonEmptyStr(data.initials, 4)
+        && (!('avatarUrl' in data) || isOptionalStr(data.avatarUrl, 120000))
+        && (!('avatarStyle' in data) || isValidAvatarStyle(data.avatarStyle))
+        && (!('accentColor' in data) || isNonEmptyStr(data.accentColor, 32))
+        && (!('favoriteGenres' in data) || (data.favoriteGenres is list && data.favoriteGenres.size() <= 12))
+        && (!('likedTrackIds' in data) || (data.likedTrackIds is list && data.likedTrackIds.size() <= 500))
+        && (!('followedArtistIds' in data) || (data.followedArtistIds is list && data.followedArtistIds.size() <= 200))
+        && (!('downloadedTrackIds' in data) || (data.downloadedTrackIds is list && data.downloadedTrackIds.size() <= 500))
+        && (!('activeDeviceId' in data) || isOptionalStr(data.activeDeviceId, 64))
+        && data.hasCompletedOnboarding is bool
+        && (!('preferences' in data) || (data.preferences is map && data.preferences.keys().size() <= 30))
+        && (!('likedSongsCustomization' in data) || (data.likedSongsCustomization is map && data.likedSongsCustomization.keys().size() <= 12))
+        && (!('listeningStats' in data) || (data.listeningStats is map && data.listeningStats.keys().size() <= 16));
+    }
+
+    function isValidUserPlaylist(data, userId, playlistId) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'trackIds', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'title', 'curator', 'description', 'trackIds', 'coverUrl',
+          'pinned', 'downloaded', 'accentGradient', 'displayMode', 'showQualityBadges',
+          'isAiBlend', 'blendMatchPct', 'sharedWithFriendId', 'createdAt', 'updatedAt'
+        ])
+        && data.id == playlistId
+        && data.ownerId == userId
+        && isNonEmptyStr(data.title, 120)
+        && (!('curator' in data) || isOptionalStr(data.curator, 120))
+        && (!('description' in data) || isOptionalStr(data.description, 400))
+        && data.trackIds is list && data.trackIds.size() <= 500
+        && (!('coverUrl' in data) || isOptionalStr(data.coverUrl, 2000))
+        && (!('pinned' in data) || data.pinned is bool)
+        && (!('downloaded' in data) || data.downloaded is bool)
+        && (!('accentGradient' in data) || isOptionalStr(data.accentGradient, 300))
+        && (!('displayMode' in data) || isValidDisplayMode(data.displayMode))
+        && (!('showQualityBadges' in data) || data.showQualityBadges is bool)
+        && (!('isAiBlend' in data) || data.isAiBlend is bool)
+        && (!('blendMatchPct' in data) || (data.blendMatchPct is number && data.blendMatchPct >= 0 && data.blendMatchPct <= 100))
+        && (!('sharedWithFriendId' in data) || isOptionalStr(data.sharedWithFriendId, 128));
+    }
+
+    function isValidDownloadedTrack(data, userId, trackId) {
+      return data.keys().hasAll(['id', 'ownerId', 'title', 'artist', 'album', 'duration', 'downloadedAt'])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'title', 'artist', 'album', 'duration', 'primaryColor',
+          'secondaryColor', 'genre', 'category', 'quality', 'coverUrl', 'fallbackGradient',
+          'playlistName', 'year', 'youtubeId', 'downloadedAt'
+        ])
+        && data.id == trackId
+        && data.ownerId == userId
+        && isNonEmptyStr(data.title, 200)
+        && isNonEmptyStr(data.artist, 150)
+        && isNonEmptyStr(data.album, 200)
+        && data.duration is number && data.duration >= 0 && data.duration <= 36000
+        && (!('primaryColor' in data) || isOptionalStr(data.primaryColor, 32))
+        && (!('secondaryColor' in data) || isOptionalStr(data.secondaryColor, 32))
+        && (!('genre' in data) || isOptionalStr(data.genre, 64))
+        && (!('category' in data) || isValidTrackCategory(data.category))
+        && (!('quality' in data) || isValidTrackQuality(data.quality))
+        && (!('coverUrl' in data) || isOptionalStr(data.coverUrl, 2000))
+        && (!('fallbackGradient' in data) || isOptionalStr(data.fallbackGradient, 300))
+        && (!('playlistName' in data) || isOptionalStr(data.playlistName, 120))
+        && (!('year' in data) || (data.year is number && data.year >= 1900 && data.year <= 2100))
+        && (!('youtubeId' in data) || isOptionalStr(data.youtubeId, 32));
+    }
+
+    function isValidUserFriend(data, userId, friendId) {
+      return data.keys().hasAll(['id', 'ownerId', 'name', 'handle', 'initials', 'isFriend', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'name', 'handle', 'initials', 'avatarUrl',
+          'isFriend', 'tasteMatchPct', 'accentColor', 'lastActiveLabel',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id == friendId
+        && data.ownerId == userId
+        && isNonEmptyStr(data.name, 100)
+        && isNonEmptyStr(data.handle, 64)
+        && isNonEmptyStr(data.initials, 4)
+        && (!('avatarUrl' in data) || isOptionalStr(data.avatarUrl, 120000))
+        && data.isFriend is bool
+        && (!('tasteMatchPct' in data) || (data.tasteMatchPct is number && data.tasteMatchPct >= 0 && data.tasteMatchPct <= 100))
+        && (!('accentColor' in data) || isOptionalStr(data.accentColor, 32))
+        && (!('lastActiveLabel' in data) || isOptionalStr(data.lastActiveLabel, 80));
+    }
+
+    // ===============================================================
+    // Listener Profile & Subcollections
+    // ===============================================================
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(request.resource.data, userId)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(request.resource.data, userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'handle', 'email', 'initials', 'avatarUrl', 'avatarStyle',
+          'accentColor', 'favoriteGenres', 'likedTrackIds', 'followedArtistIds',
+          'downloadedTrackIds', 'activeDeviceId', 'hasCompletedOnboarding',
+          'preferences', 'likedSongsCustomization', 'listeningStats', 'updatedAt'
+        ])
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      match /playlists/{playlistId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create: if isValidId(userId)
+          && isValidId(playlistId)
+          && isOwner(userId)
+          && isValidUserPlaylist(request.resource.data, userId, playlistId)
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(playlistId)
+          && isOwner(userId)
+          && isValidUserPlaylist(request.resource.data, userId, playlistId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title', 'curator', 'description', 'trackIds', 'coverUrl', 'pinned',
+            'downloaded', 'accentGradient', 'displayMode', 'showQualityBadges',
+            'isAiBlend', 'blendMatchPct', 'sharedWithFriendId', 'updatedAt'
+          ])
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time;
+        allow delete: if isValidId(userId) && isValidId(playlistId) && isOwner(userId);
+      }
+
+      match /downloads/{trackId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create: if isValidId(userId)
+          && isValidId(trackId)
+          && isOwner(userId)
+          && isValidDownloadedTrack(request.resource.data, userId, trackId)
+          && request.resource.data.downloadedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(trackId)
+          && isOwner(userId)
+          && isValidDownloadedTrack(request.resource.data, userId, trackId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title', 'artist', 'album', 'duration', 'primaryColor', 'secondaryColor',
+            'genre', 'category', 'quality', 'coverUrl', 'fallbackGradient',
+            'playlistName', 'year', 'youtubeId', 'downloadedAt'
+          ])
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.downloadedAt == request.time;
+        allow delete: if isValidId(userId) && isValidId(trackId) && isOwner(userId);
+      }
+
+      match /friends/{friendId} {
+        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow create: if isValidId(userId)
+          && isValidId(friendId)
+          && isOwner(userId)
+          && isValidUserFriend(request.resource.data, userId, friendId)
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(friendId)
+          && isOwner(userId)
+          && isValidUserFriend(request.resource.data, userId, friendId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'handle', 'initials', 'avatarUrl', 'isFriend',
+            'tasteMatchPct', 'accentColor', 'lastActiveLabel', 'updatedAt'
+          ])
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time;
+        allow delete: if isValidId(userId) && isValidId(friendId) && isOwner(userId);
+      }
+    }
+
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
