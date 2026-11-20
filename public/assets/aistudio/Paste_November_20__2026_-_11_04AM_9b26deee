@@ -1,0 +1,173 @@
+Integrate the Battery Status API to display the user's devices active in that account including the Bluetooth devices connected battery level in the Settings menu, updating periodically for better power management awareness.
+Perform a complete, deep architectural, database, functional, and UI/UX overhaul of **KLYN**. Keep the signature pure pitch-black `#000000` OLED canvas and Apple-style Liquid Glass surfaces (`backdrop-filter: blur(28px..36px)`, subtle specular rim borders, zero phone mockup frames), while elevating typography, contrast, interactive hover states, zero-hang audio reliability, bulletproof streaming service syncing, full offline consistency with a Spotify-style auto-hiding bottom online/offline banner, YouTube-style typo-tolerant search with an active recent-history view, borderless circular artist profiles everywhere, clean uncluttered cards without extra sub-information or avatar frames, fresh-download onboarding with real music genres (`Trap`, `R&B`, `Pop`, `Opium`, etc.) and real OS device notifications, non-repeating Smart Shuffle & infinite continuous listening, continuous background & lock-screen playback, live real-time music chart & trend feeds with real high-res covers and artist photos via free APIs, strict removal of censored/clean versions that blur or mute words, Podcasts & Audiobooks derived from YouTube and Spotify, a dedicated vertical **KLYN Reels** preview discovery page that adds full-length songs to playlists, hero-bannered album/playlist views, full Spotify Connect-style persistent device discovery & cross-device remote control, offline downloads management, social sharing, Web Bluetooth hardware connection with BottomDock live state indicators, one-click PWA installation, a 1.5-second non-looping wide-variety song/artist recommendation hero banner replacing homepage greetings, always-ready preloaded categories/items with zero scroll-time loading, subtle look-and-feel depth/opacity cues from Spotify, SoundCloud, Audiomack, and Apple Music without altering KLYN's core design, a centralized custom brand logo slot ready for your attached logo image, and **bouncy, fluid Apple-like spring animations across every single aspect of the app** (including loading visuals and all UI visuals).
+
+====================================================================
+1. PROVISION NEW FIREBASE PROJECT, NEW DATABASE, FREE APIS & STRICT PER-USER ISOLATION
+====================================================================
+- Completely disconnect and remove all references, configs, and environment variables tied to the old broken Firebase project (`gen-lang-client-0052983588`).
+- Provision a **brand-new Firebase project** and initialize a **brand-new Cloud Firestore database** (Native mode) from scratch for KLYN, enabling Firebase Authentication (Google Sign-In & Email/Password) and updating all `VITE_FIREBASE_*` environment variables and `src/services/firebase.ts` to point strictly to this newly created project.
+- **Database ID Already Known (`(default)`):** Do NOT ask for or require a Firebase database ID variable—always treat KLYN's Cloud Firestore database ID as `(default)` (`initializeFirestore(app, { experimentalAutoDetectLongPolling: true, localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) })` targeting the `(default)` database) so connections never hang or throw false offline errors during session restore.
+- **Centralized Custom App Logo (`public/klyn-logo.png` & `src/components/KlynLogo.tsx`):**
+  * Use the attached dark KLYN logo image as the centralized logo asset (`public/klyn-logo.png`) and reusable `KlynLogo` component across EVERY surface in the app—Log In / Sign Up screen, splash/loading pulse emblem, Upper Menu Bar, Settings/About, Listening Receipt / Wrapped share cards, favicon, `apple-touch-icon`, and PWA `public/manifest.json` icons.
+- **Free Public APIs, Real Covers/Artist Profiles & Zero-Failure Key Setup:**
+  * Configure every external integration to work immediately out of the box using free, no-key-required public endpoints plus AI Studio's auto-provisioned keys to deliver a premium experience with zero dead placeholders:
+    - **Real Song Covers, Album Covers & Live Charts:** Apple Marketing Tools public RSS/JSON feeds (`rss.marketingtools.apple.com`) + iTunes Search & Lookup API (`itunes.apple.com/search` & `/lookup` — free, no API key required), upgrading all song and album cover artwork URLs to `600x600bb` / `1000x1000bb` for crisp, authentic official cover art everywhere.
+    - **Real Artist Profile Pictures (`src/services/artistProfiles.ts`):** Fetch real, high-resolution artist profile photos using free, unauthenticated public endpoints—primarily the **Deezer Public Artist API** (`https://api.deezer.com/search/artist?q=...` -> `picture_xl` / `picture_big`, with CORS-safe JSONP/proxy fallback) paired with **iTunes Artist Lookup** (`itunes.apple.com/search?entity=musicArtist` + top release artwork) and cached in memory + `localStorage` so every artist circle displays the real artist photo.
+    - **Strict Removal of Censored / Clean / Word-Blurring Versions:** Always pass `explicit=Yes` on iTunes Search queries and run a strict catalog & stream filter that **excludes** any track flagged as `trackExplicitness === 'cleaned'` or matching clean/censored/edited patterns (`[Clean]`, `(Clean)`, `Clean Version`, `Radio Edit`, `Edited`, `Censored`) so songs with blurred/muted/bleeped words are never shown or played—always resolving the original uncensored version (including on YouTube audio resolution).
+    - **Podcasts & Audiobooks:** iTunes Podcast & Audiobook Search API (`media=podcast` / `media=audiobook` — free, no key required) + YouTube public search/Piped/Invidious & oEmbed endpoints + Spotify public link/oEmbed metadata parser.
+    - **Time-Synced Lyrics:** LRCLIB public API (`https://lrclib.net/api/get` & `/search` — free, no API key required).
+    - **Full-Length Audio & Video Streams:** YouTube IFrame Player API + public YouTube search resolution (no paid YouTube Data API quota limits).
+    - **AI Wrapped, Blend & Recommendations:** Auto-provisioned `GEMINI_API_KEY` from the AI Studio environment (with graceful local statistical fallback if unavailable).
+- Strip all legacy/shared database schemas, un-scoped `localStorage` keys, and shared IndexedDB stores so KLYN starts completely fresh.
+- Guarantee 100% strict per-user isolation so unlimited users can use KLYN on separate or shared devices with ZERO overlap of private data:
+  * **Private User Firestore Tree (`users/{uid}`):**
+    - `users/{uid}` (main profile document): `uid`, `email`, `displayName`, `handle`, `avatarUrl`, `hasCompletedOnboarding`, `tasteGenres`, `favoriteArtists`, `notificationsEnabled`, `settings` (crossfadeSeconds, gaplessPlayback, autoplay, normalizeVolume, privateSession, liveActivitySharing, glassIntensity, accentTint), `connectedApps` (`spotify`, `audiomack`, `soundcloud`, `tunesimo` — each storing `connected`, `accountHandle`, `profileUrl`, `lastSyncedAt`, `syncedPlaylistsCount`, `syncedAlbumsCount`, `syncedRadiosCount`, `autoSyncEnabled`), `wrappedStats` (totalMinutes, topGenresMap, artistPlayCounts, trackPlayCounts, listeningPersonality), `recentSearches` (latest 20 queries), `playbackState` (`track`, `positionSeconds`, `durationSeconds`, `queue`, `queueIndex`, `isPlaying`, `shuffleMode`: `'off' | 'shuffle' | 'smart'`, `repeatMode`: `'off' | 'all' | 'one'`, `activeDeviceId`, `activeDeviceName`, `lastActionByDeviceId`, `updatedAt`).
+    - `users/{uid}/liked_tracks/{trackId}`: User's personal liked songs and saved tracks.
+    - `users/{uid}/playlists/{playlistId}`: User's custom created, edited, saved, and synced playlists & radio mixes.
+    - `users/{uid}/saved_albums/{albumId}`: User's saved & Spotify-synced albums.
+    - `users/{uid}/saved_shows/{showId}`: User's saved Podcasts & Audiobooks.
+    - `users/{uid}/pinned_items/{itemId}`: User's pinned playlists, albums, radios, podcasts, audiobooks, or artists.
+    - `users/{uid}/followed_artists/{artistId}`: User's followed artists.
+    - `users/{uid}/playback_history/{entryId}`: Timestamped personal listening history.
+    - `users/{uid}/downloads_meta/{trackId}`: Metadata index of tracks and playlist items downloaded/saved offline by this user.
+    - `users/{uid}/devices/{deviceId}`: Persistent registry of every device signed into this account.
+  * **Strict On-Device Namespacing & Clean Session Switching:**
+    - Prefix EVERY user-scoped `localStorage` key with `klyn_v4_${uid}_` and scope IndexedDB offline storage per user (`klyn_offline_db_v4_${uid}`).
+    - On Sign Out or account switch, pause/stop active playback, revoke active audio blobs, unsubscribe Firestore listeners, reset React state, and hydrate exclusively from the newly authenticated `uid`.
+
+====================================================================
+2. CLEAN UNCLUTTERED UI, BORDERLESS ROUND ARTIST PROFILES & DEVICE CENTRALIZATION
+====================================================================
+- **Remove Extra Sub-Information & Avatar Frames Everywhere:**
+  * Keep every card, track row, playlist card, and header super clean and minimal—**remove extra sub-information clutter** (no redundant metadata tags, duration clutter, year/label subtitles, or noisy secondary lines everywhere; show only the essential **Title** and **Artist/Author**).
+  * **Remove All Avatar Frames:** Never wrap user profile pictures or artist profile photos in decorative rings, borders, or frames—render clean, pure borderless circles (`rounded-full object-cover`).
+- **Borderless Round Artist Profiles Everywhere (No Surrounding Tiles):**
+  * Across **Home**, **Search**, **Library**, **Activity**, and **Artist Lists**, **remove the rectangular/square tile boxes surrounding artists**—display **ONLY the clean circular artist profile photo** (`rounded-full`) with the **artist's name centered directly below it**.
+- **Perfect Spacing, Zero Blocking & Multi-Device Centralization:**
+  * Use responsive centered layout containers (`mx-auto w-full max-w-screen-xl` on desktop/tablet, fluid `px-4 sm:px-6 lg:px-8` on mobile/web) and proper `env(safe-area-inset-top)` / `env(safe-area-inset-bottom)` spacing across mobile phones, tablets, laptops, and desktop browsers.
+  * Dynamically calculate and reserve exact bottom clearance (`pb-36` / `pb-44`) on every scrollable container so the floating **BottomDock**, **Mini-Player**, and **Offline/Online Status Pill** **never overlap or block** the last row, button, or card on any screen size.
+
+====================================================================
+3. FULL OFFLINE MODE CONSISTENCY & SPOTIFY-STYLE AUTO-HIDING BOTTOM STATUS BAR
+====================================================================
+- **Consistent Offline Experience (Library & Downloads Work Offline; Online Search Disabled Offline):**
+  * Monitor `navigator.onLine` + real connectivity probes in real time so KLYN remains completely stable, responsive, and consistent when offline:
+    - **Offline Available:** Home (served from persisted `stale-while-revalidate` cache), Library, Playlists, Saved Songs, Offline Downloads, and previously cached Lyrics/Artwork continue working smoothly without crashes or blank error screens.
+    - **Offline Playback:** Downloaded tracks and cached audio blobs play immediately offline; attempting to stream an un-downloaded online-only track shows a clean toast (*"Available online or download first"*).
+    - **Offline Search Guard:** When offline, pressing or submitting in Search clearly informs the user (*"You're offline • Connect to the internet to search new songs"*) while still allowing instant filtering of their offline/downloaded songs.
+- **Spotify-Style Bottom Offline / Back-Online Indicator (Auto-Disappears):**
+  * Render a sleek, compact status pill bar docked right at the bottom above the navigation dock (`BottomDock`) modeled after Spotify's connectivity bar:
+    - When `isOffline === true`: Slides up smoothly with a dark matte/charcoal pill (`No internet connection • Offline mode`).
+    - When connection is restored (`isOffline` transitions `true -> false`): Smoothly morphs into a crisp emerald/green pill (`Back online`) and **automatically slides down and disappears after 2.5 seconds** so it never stays stuck on screen.
+
+====================================================================
+4. FRESH-DOWNLOAD ONBOARDING (REAL GENRES + REAL DEVICE NOTIFICATIONS, NO REPLAY SETUP)
+====================================================================
+- **Triggers Automatically on Fresh Download / First Launch (No Replay Button):**
+  * Trigger the interactive onboarding flow automatically whenever the app is freshly downloaded/installed or a new user signs in (`!hasCompletedOnboarding` / fresh install flag `klyn_fresh_install_onboarded_v4`).
+  * **Remove Replay Setup:** Do NOT include any "Replay Onboarding" button in Settings or Profile.
+- **User Authentication (Sign Up / Log In):**
+  * Support **Sign Up** (email, password, display name/handle) and **Log In** (email/password + **Continue with Google**) on `#000000` with centered `KlynLogo` and a clean Liquid Glass card.
+- **Streamlined Onboarding Steps (No Spatial / Audio-Taste Selection):**
+  * **Step 1 — Connect Your Apps:** Link **Spotify**, **Audiomack**, **SoundCloud**, and **Tunesimo** immediately after sign-in/sign-up (with **Continue** and **"Set up later in Settings"**).
+  * **Step 2 — Identity Setup:** Display Name, unique `@handle`, and clean borderless circular profile photo.
+  * **Step 3 — Real Music Genres Selection (Powers Personal Feed):**
+    - Remove spatial audio / equalizer / audio-mode selection steps completely.
+    - Present clean, bouncy genre pills for **real music genres**: **Trap**, **R&B**, **Pop**, **Opium**, **Hip-Hop**, **Afrobeats**, **UK / NY Drill**, **Amapiano**, **Rage / Underground**, **Melodic Rap**, **Electronic**, **Alternative**, **Dancehall**, and **Soul**.
+    - Save selected genres to `users/{uid}.tasteGenres` and immediately use them (alongside favorite artists) to generate and rank the user's personalized Home shelves, Hero Banner recommendations, and KLYN Reels feed.
+  * **Step 4 — Real Device Notifications Setup:**
+    - Include a dedicated **Enable Notifications** card in onboarding with a one-tap **Turn On Notifications** button (plus **Not Now**).
+    - When enabled, call `Notification.requestPermission()`, register the Service Worker push/notification handler (`public/sw.js`), store `notificationsEnabled: true`, and trigger **real native OS/device notifications** (`registration.showNotification(...)` / `new Notification(...)`) for real events: new releases from followed/favorite artists, incoming Friend Requests, AI Blend invites, Listen Party invites, and cross-device playback handoffs.
+
+====================================================================
+5. YOUTUBE-STYLE TYPO-TOLERANT SEARCH + DUAL ACTIVE (RECENT HISTORY) / INACTIVE STATES
+====================================================================
+- **Two Distinct Search States (Inactive Genre Grid vs. Active Blank Recent-History Page):**
+  1. **Inactive Search Page (Default When Search Bar Is Not Focused):**
+     - Displays the bold **Search** header, the search input bar, and the full **Browse Genres** grid (**Trap**, **R&B**, **Pop**, **Opium**, **Hip-Hop**, **Afrobeats**, **UK / NY Drill**, **Amapiano**, **Electronic**, **Alternative**, **Latin**, plus **Podcasts & Audiobooks**).
+  2. **Active Search Page (Immediately When Search Bar Is Pressed / Focused):**
+     - Pressing/focusing the search bar immediately transitions into a **clean blank search page** showing ONLY the active search bar (with a **Cancel / Back** button to return to the genre page) and the user's **Recent Search History** list (tapping any recent item runs it immediately; each item has an `×` remove button plus **Clear All**).
+- **YouTube-Style Intent & Typo-Tolerant Smart Search (`src/services/smartSearch.ts`):**
+  * As the user types, resolve what they actually mean **even if their spelling is wrong** (e.g., `"playboi carti opim"` -> Playboi Carti / Opium, `"don tolver"` -> Don Toliver, `"travis scot fein"` -> Travis Scott - FE!N, `"kendrik lamar"` -> Kendrick Lamar):
+    1. Query free autocomplete/suggestion endpoints (iTunes Search + YouTube/Google-compatible suggestion endpoint `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=...` via JSONP/CORS-safe fetch) to auto-correct misspelled artist and song names in real time.
+    2. Run fuzzy matching (normalized Levenshtein / token similarity) and display a subtle *"Showing results for **[Corrected Query]**"* pill when a typo was auto-resolved, returning real uncensored songs, albums, and borderless circular artist profiles.
+
+====================================================================
+6. BULLETPROOF STREAMING SERVICE SYNC (SPOTIFY, AUDIOMACK, SOUNDCLOUD & TUNESIMO)
+====================================================================
+- **Fix Streaming Service Loading So It Never Fails or Hangs:**
+  * Overhaul `src/services/connectedApps.ts` so connecting, pasting a link, or syncing **Spotify**, **Audiomack**, **SoundCloud**, and **Tunesimo** is fast, resilient, and never gets stuck on infinite loading spinners:
+    1. **Strict Timeout & Multi-Fallback Pipeline:** Wrap every external fetch in an `8-second` `AbortController` timeout and run a multi-tier fallback chain (direct OAuth/API when configured -> public oEmbed endpoint -> CORS-safe metadata proxy -> iTunes Search/Lookup tracklist enrichment) so pasting any Spotify/Audiomack/SoundCloud playlist, album, radio, podcast, or profile URL always resolves cleanly without failing.
+    2. **Instant Optimistic State & Clear Progress Feedback:** Immediately persist connection status to `users/{uid}.connectedApps`, update counts (`Playlists`, `Albums`, `Radios`), and render a clean inline toast on completion or clear actionable message if a URL is private/invalid—never leaving a stuck loader.
+    3. **Full Ecosystem Sync:** Imports Spotify playlists, saved albums, daily/artist radio stations, podcasts, and profile taste into KLYN's Library and Home shelves.
+
+====================================================================
+7. DOWNLOADS, PLAYLIST CRUD, SOCIAL SHARING, BLUETOOTH & ONE-CLICK PWA INSTALL
+====================================================================
+- **Offline Downloads Manager:** Download individual tracks or entire playlists with animated progress (`0% -> 100%`), calculated storage usage (MB), user-scoped IndexedDB (`klyn_offline_db_v4_${uid}`), **Offline Available** badges, and a Downloads Manager to inspect/delete offline items.
+- **Playlist CRUD & Saved Songs:** Create, edit (rename, reorder/remove tracks, delete), and save playlists; add/remove songs anywhere; dedicated **Saved Songs** view.
+- **Social Sharing:** Share currently playing song, album, or playlist via generated link (copy-to-clipboard) or direct social platforms (`navigator.share`, X/Twitter, WhatsApp, Instagram, Facebook, Telegram) with a **Share button** right near track info.
+- **Web Bluetooth (`src/services/bluetooth.ts`) + `BottomDock` Status Indicator:** Real `navigator.bluetooth.requestDevice` hardware scanning/connection surfaced via an App hook/service, with a live visual indicator inside **`BottomDock`** displaying **`scanning`**, **`connecting`**, or **`connected`** states.
+- **One-Click Native PWA Install (`beforeinstallprompt` in `src/App.tsx`):** Capture `beforeinstallprompt` in `src/App.tsx` and expose a button in `ProfileSettingsModal` / `TopBar` that calls `deferredPrompt.prompt()` to immediately install KLYN onto the device.
+
+====================================================================
+8. PODCASTS & AUDIOBOOKS + KLYN REELS (ZERO CONTROLS, `+` ADDS FULL SONG)
+====================================================================
+- **Podcasts & Audiobooks (YouTube & Spotify Derived):** Dedicated category on Homepage + Show Detail Pages with episode/chapter resume memory, speed controls (`1.0x–2.0x`), and `±15s` skip.
+- **KLYN Reels (`100dvh` Vertical Swipe Feed):**
+  * Auto-plays real uncensored iTunes 30s `previewUrl` audio while displaying **ONLY high-res cover art** and **STRICTLY ZERO playback controls** (no play/pause, scrubbers, progress bars, or timers).
+  * Bottom-left shows only a small circular artist photo + track name; bottom-right has a per-reel **`+` button** that adds the **complete full-length uncensored song** (not the 30s preview) to any selected playlist.
+
+====================================================================
+9. SMART SHUFFLE, NON-REPEATING CONTINUOUS LISTENING, BACKGROUND PLAYBACK & DEVICE HANDOFF
+====================================================================
+- **Smart Shuffle & Non-Repeating Continuous Listening:**
+  * 3-mode shuffle (`off` -> `shuffle` -> `smart`): Fisher-Yates non-repeating shuffle + **Smart Shuffle** (weaves in fresh uncensored recommendations) + session-wide `playedTrackKeysRef` so the exact same song **never repeats** during continuous listening unless the user plays it manually or enables single-track repeat (`repeatMode === 'one'`).
+- **Uninterrupted Background & Lock-Screen Playback + Persistent Device Handoff:**
+  * Never pause on `visibilitychange` or `blur`; maintain `AudioContext` keep-alive, Screen Wake Lock, and full `navigator.mediaSession` lock-screen/notification controls & scrub bar.
+  * Persistent `users/{uid}/devices/{deviceId}` heartbeat so background/standby devices stay visible for one-tap handoff, with pop-up takeover banner when opened on a second device, automatic audio stop on the old device when a new song is tapped, and real-time remote control + synced lyrics across devices.
+
+====================================================================
+10. BOUNCY SPRING ANIMATIONS, ALWAYS-READY PRELOADED ITEMS & PAGE ARCHITECTURE
+====================================================================
+- **Bouncy Apple Spring Physics & Preloaded Zero-Scroll-Load Architecture:**
+  * Apply GPU-only spring easing (`cubic-bezier(0.34, 1.56, 0.64, 1)` and `cubic-bezier(0.22, 1, 0.36, 1)`) across all loading visuals (`KlynLogo` bounce/pulse, shimmering glass skeletons, spring loaders) and all UI interactions (sliding pill thumb, hover lift, press squish, modal springs, swipe-to-dismiss mini-player).
+  * Draw subtle surface opacity and glass depth cues from Spotify, SoundCloud, Audiomack, and Apple Music without changing KLYN's core `#000000` Liquid Glass design.
+  * Preload and cache (`stale-while-revalidate`) all categories, shelves, genres, podcasts/audiobooks, and real artist profile photos upfront so scrolling never triggers on-the-fly loading states.
+  * Include a 3.5s stalled-stream watchdog, next-track pre-buffering, stream ID cache, and 0ms optimistic UI updates.
+- **Core Pages & Social (`public_profiles`, `friend_requests`, `users/{uid}/friends`, `blend_requests`, `listen_parties` + `firestore.rules`):**
+  * **Upper Bar:** Enlarged minimal top bar (hidden on KLYN Reels) with ONLY `KlynLogo` + bold wordmark on the left and borderless circular user avatar on the right.
+  * **Homepage:** Top greetings removed and replaced with an auto-advancing **1.5-second non-looping wide-variety Song & Artist Recommendation Hero Banner**; no "Trending" section; larger Quick Picks, personalized genre/artist shelves, synced Spotify items, **Podcasts & Audiobooks**, new releases, and borderless circular artist profiles.
+  * **Album, Playlist, Radio & Show Pages:** Complete tracklists with a **#1 Top Track Hero Banner** powered by real chart/popularity data.
+  * **Lyrics Page:** Dynamic cover ambient backdrop, large bouncy synced lyrics with tap-to-seek, and redesigned Liquid Glass bottom dock with zero overlap.
+  * **Activity (No Streak):** (1) **Klyn Wrapped (AI-Powered)** with **Listening Receipt** & **Share to Story (9:16 PNG)**, (2) **Most Listened Artists**, (3) **Most Listened Songs**, (4) **Recently Listened Preview**.
+  * **Library & Settings / ProfileSettingsModal:** Create/edit/save playlists, Saved Songs, Downloads Manager, compact Profile Card, Connected Apps, Audio/Notifications/Bluetooth/Offline/PWA Install, and Sign Out (no Replay Onboarding button).
+
+Guard all `useEffect` hooks, Firestore `onSnapshot` listeners, IndexedDB queries, swipe gesture handlers, 1.5s hero banner timers, connectivity listeners, watchdog intervals, heartbeat timers, remote sync clocks, Reels IntersectionObservers, Bluetooth listeners, and `navigator.mediaSession` callbacks with refs and cleanup functions so there are zero infinite render loops (`Maximum update depth exceeded`) or memory leaks.
+
+"Use the attached image as the official KLYN app logo (public/klyn-logo.png and src/components/KlynLogo.tsx) across all screens, loading animations, Upper Menu Bar, PWA manifest icons, favicon, and share cards."https://share.gemini.google/CdlqnM4VizWs
+
+Add a **Reset Password** flow to **KLYN**'s Log In / Sign Up screen using Firebase Authentication (`sendPasswordResetEmail` from `firebase/auth`):
+
+1. **Forgot / Reset Password Trigger on Log In View:**
+   - Add a subtle, accessible **"Forgot password?"** link/button right below the password field on the Log In form (using bouncy Apple spring hover/press feedback and clean typography matching KLYN's `#000000` OLED & Liquid Glass aesthetic).
+2. **Reset Password View / Liquid Glass Card:**
+   - Clicking **"Forgot password?"** switches smoothly into a dedicated **Reset Password** view (with a clear **Back to Sign In** button) featuring an email input (pre-filled with whatever email the user already typed in the Log In form, if any) and a primary **Send Reset Link** button.
+3. **Firebase Auth Execution, Clear Feedback & Rate-Limit Protection:**
+   - Call `sendPasswordResetEmail(auth, email.trim())` with clear client-side email validation and friendly error messages (e.g., invalid email format, too many requests, or network issues).
+   - Once sent, show a crisp confirmation state (*"Password reset link sent to [email]. Check your inbox and spam folder."*) with a **Resend Link** option (with a short cooldown timer so it can't be spammed) and **Back to Sign In**.
+   - Keep all state and timers properly cleaned up so there are zero memory leaks or render loops.
+npm i @vercel/analytics
+
+Update the music category shelves and tiles across **KLYN** so category music cards use **Netflix-style landscape (`16:9` / wide horizontal aspect ratio)** tiles instead of square tiles, while preserving KLYN's pure `#000000` OLED canvas, Apple Liquid Glass surfaces, bouncy spring physics, zero phone mockup frames, and clean minimal card layouts (no extra sub-information clutter or avatar frames).
+
+====================================================================
+1. NETFLIX-STYLE LANDSCAPE CATEGORY TILES (`aspect-video` / Wide Horizontal)
+====================================================================
+- **Landscape Orientation & Responsive Grid/Row Sizing:**
+  * Render category music tiles in a wide horizontal **landscape aspect ratio** (`aspect-video` / `16:9` or wide landscape rail cards, e.g., `w-64 sm:w-72 md:w-80 aspect-video` in horizontal shelves and `grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4` with `aspect-video` cards in expanded category views).
+  * Center or frame high-resolution artwork cleanly inside the landscape tile using subtle ambient blurred cover/glass fill behind the artwork so wide landscape cards never look stretched, cropped awkwardly, or pixelated.
+- **Clean Uncluttered Card Layout (No Extra Sub-Info):**
+  * Keep each landscape tile crisp and minimal with **only** the clean **Track / Playlist Title** and **Artist / Creator** (and an **Offline Available** badge when downloaded)—no extra sub-information tags, durations, or clutter.
+- **Bouncy Apple Spring Hover & Tap Feedback:**
+  * Apply smooth GPU-only spring hover lift (`scale-[1.025]`), subtle Liquid Glass specular border highlight, and tactile press squish (`scale-[0.98]`) across all landscape category tiles, keeping borderless circular artist profile photos separate without surrounding rectangular tiles.

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Check, Copy, Download, Share2, X } from 'lucide-react';
 import { ArtistPlayStat, formatTime } from '../data/catalog';
 import { ActivityPeriod, Track } from '../types/music';
-import { BrandLogo } from './BrandLogo';
+import { KlynLogo } from './KlynLogo';
 
 interface MusicReceiptModalProps {
   isOpen: boolean;
@@ -10,7 +10,7 @@ interface MusicReceiptModalProps {
   period: ActivityPeriod;
   totalTime: string;
   tracksPlayed: number;
-  streakDays: number;
+  streakDays?: number;
   artistStats: ArtistPlayStat[];
   tracks: Track[];
 }
@@ -21,7 +21,6 @@ export const MusicReceiptModal: React.FC<MusicReceiptModalProps> = ({
   period,
   totalTime,
   tracksPlayed,
-  streakDays,
   artistStats,
   tracks,
 }) => {
@@ -71,7 +70,7 @@ export const MusicReceiptModal: React.FC<MusicReceiptModalProps> = ({
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.font = '600 26px monospace';
     ctx.fillText(`LISTENER SUMMARY · ${period.toUpperCase()}`, 175, 315);
-    ctx.fillText(`STREAK: ${streakDays} DAYS  |  PLAYS: ${tracksPlayed}`, 175, 355);
+    ctx.fillText(`PLAYS: ${tracksPlayed}  |  TOTAL TIME: ${totalTime}`, 175, 355);
 
     ctx.strokeStyle = 'rgba(255,255,255,0.16)';
     ctx.setLineDash([8, 8]);
@@ -197,7 +196,7 @@ export const MusicReceiptModal: React.FC<MusicReceiptModalProps> = ({
   const handleCopy = () => {
     const lines = [
       `KLYN LISTENING SUMMARY (${period})`,
-      `Total: ${totalTime} | Plays: ${tracksPlayed} | Streak: ${streakDays}d`,
+      `Total: ${totalTime} | Plays: ${tracksPlayed}`,
       ...topTracksList.map(
         ({ stat, track }, i) => `0${i + 1}. ${track.title} — ${track.artist} (${stat.topTrackPlays} plays)`,
       ),
@@ -238,14 +237,14 @@ export const MusicReceiptModal: React.FC<MusicReceiptModalProps> = ({
         <div className="rounded-2xl border border-white/15 bg-zinc-950/90 p-5 font-mono text-xs text-white shadow-inner">
           <div className="text-center border-b border-dashed border-white/20 pb-3.5">
             <div className="inline-flex items-center justify-center gap-2">
-              <BrandLogo className="h-5 w-5 rounded-md" />
+              <KlynLogo className="h-5 w-5 rounded-md" />
               <p className="font-display text-lg font-bold tracking-tight text-white">klyn</p>
             </div>
             <p className="mt-1 text-[10px] tracking-[0.16em] uppercase text-white/55">
               AUDIO ARCHIVE · {period}
             </p>
             <p className="mt-1 text-[10px] text-white/45 tabular-nums">
-              STREAK: {streakDays} DAYS · TRACKS: {tracksPlayed}
+              TRACKS PLAYED: {tracksPlayed}
             </p>
           </div>
 

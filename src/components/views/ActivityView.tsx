@@ -1,14 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   Award,
-  BellRing,
   Check,
   Clock,
   Disc3,
   FileText,
-  Flame,
   Heart,
+  Loader2,
   Pause,
   Play,
   Plus,
@@ -21,12 +20,8 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import {
-  ArtistPlayStat,
-  formatDurationSummary,
-  formatTime,
-  getLocalDateKey,
-} from '../../data/catalog';
+import { ArtistPlayStat, formatDurationSummary, formatTime } from '../../data/catalog';
+import { fetchRealArtistPhoto, getCachedArtistPhoto } from '../../services/artistProfiles';
 import {
   ActivityPeriod,
   ListenPartyMessage,
@@ -36,7 +31,7 @@ import {
   Track,
   UserAccount,
 } from '../../types/music';
-import { loadSavedAccounts } from '../../utils/storage';
+import { searchPublicProfilesFromFirestore } from '../../utils/firestoreSync';
 import { CoverArt } from '../CoverArt';
 import { MusicReceiptModal } from '../MusicReceiptModal';
 import { PillTabItem, SpringPillTabs } from '../SpringPillTabs';
@@ -44,12 +39,21 @@ import { StoryShareModal } from '../StoryShareModal';
 
 type ActivitySubPage = 'My Activity' | 'Friends & Social';
 
+interface AiWrappedSummary {
+  headline: string;
+  persona: string;
+  summary: string;
+  vibeTags: string[];
+  source: string;
+}
+
 interface ActivityViewProps {
   tracks: Track[];
   currentUser: UserAccount;
   listeningStats: ListeningStatsState;
   recentLog: ListeningLogEntry[];
   favoriteIds: Set<string>;
+  downloadedTrackIds?: Set<string>;
   activeTrackId: string;
   activeTrack: Track | null;
   isPlaying: boolean;
@@ -87,7 +91,7 @@ const PERIOD_TABS: PillTabItem<ActivityPeriod>[] = [
 const WEEKDAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
 
 function getMonSunLabel(date: Date): (typeof WEEKDAY_ORDER)[number] {
-  const jsDay = date.getDay(); // 0=Sun..6=Sat
+  const jsDay = date.getDay();
   const idx = jsDay === 0 ? 6 : jsDay - 1;
   return WEEKDAY_ORDER[idx];
 }
@@ -98,6 +102,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
   listeningStats,
   recentLog,
   favoriteIds,
+  downloadedTrackIds: _downloadedTrackIds,
   activeTrackId,
   activeTrack,
   isPlaying,
@@ -124,12 +129,16 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
   const [period, setPeriod] = useState<ActivityPeriod>('This Week');
   const [hoveredDay, setHoveredDay] = useState<string | null>(null);
   const [selectedArtistStatName, setSelectedArtistStatName] = useState<string | null>(null);
-  const [streakAlertEnabled, setStreakAlertEnabled] = useState(true);
   const [isStoryModalOpen, setIsStoryModalOpen] = useState(false);
   const [isReceiptOpen, setIsReceiptOpen] = useState(false);
+  const [artistPhotos, setArtistPhotos] = useState<Record<string, string>>({});
+  const [aiWrapped, setAiWrapped] = useState<AiWrappedSummary | null>(null);
+  const [isLoadingWrapped, setIsLoadingWrapped] = useState(false);
 
   // Friends & Social state
   const [userSearch, setUserSearch] = useState('');
+  const [remotePublicUsers, setRemotePublicUsers] = useState<SocialUser[]>([]);
+  const [isSearchingDirectory, setIsSearchingDirectory] = useState(false);
   const [partyInput, setPartyInput] = useState('');
   const [partyControlAsFriend, setPartyControlAsFriend] = useState(false);
   const [selectedBlendFriendId, setSelectedBlendFriendId] = useState<string>(
@@ -152,14 +161,12 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
     return map;
   }, [tracks]);
 
-  // Real period analytics derived purely from listeningStats
   const computedActivity = useMemo(() => {
     const now = Date.now();
     const dayMs = 86_400_000;
     const daysWindow = period === 'This Week' ? 7 : period === '30 Days' ? 30 : null;
     const cutoffTs = daysWindow ? now - daysWindow * dayMs : 0;
 
-    // 1. Daily minutes across Mon-Sun + totalMinutes
     const dayTotals: Record<string, number> = {
       Mon: 0,
       Tue: 0,
@@ -201,7 +208,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
       minutes: Math.round(dayTotals[day]),
     }));
 
-    // 2. Play events inside the selected timeframe
     const eventsInPeriod = (listeningStats.playEvents ?? []).filter(
       (ev) => !cutoffTs || ev.ts >= cutoffTs,
     );
@@ -236,7 +242,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
         );
       }
     } else {
-      // Fallback to lifetime trackPlayCounts / artistPlayCounts when no timestamped events exist
       const countValues = Object.values(listeningStats.trackPlayCounts ?? {});
       const lifetimeTracks = countValues.reduce((sum, n) => sum + n, 0);
       tracksPlayed = lifetimeTracks;
@@ -255,11 +260,9 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
         curArt.seconds += count * secPerPlay;
         curArt.trackPlays[trackId] = (curArt.trackPlays[trackId] ?? 0) + count;
         artistAgg.set(artistName, curArt);
-
         songAgg.set(trackId, { plays: count, seconds: count * secPerPlay });
       });
 
-      // Also include artistPlayCounts entries that may not have track entries in memory
       Object.entries(listeningStats.artistPlayCounts ?? {}).forEach(([artistName, count]) => {
         if (count <= 0 || artistAgg.has(artistName)) return;
         artistAgg.set(artistName, {
@@ -326,7 +329,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
       totalMinutes: Math.round(totalMinutes),
       totalTime: formatDurationSummary(totalMinutes),
       tracksPlayed,
-      streakDays: listeningStats.streakDays ?? 0,
       dailyBars,
       artistStats,
       songStats,
@@ -338,11 +340,104 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
     };
   }, [listeningStats, period, recentLog, trackById]);
 
-  const todayMinutes = Math.round(
-    listeningStats.dailyMinutesByDate?.[getLocalDateKey()] ?? 0,
-  );
-  const dailyGoalPct = Math.min(100, Math.round((todayMinutes / 30) * 100));
-  const dailyGoalRemaining = Math.max(0, 30 - todayMinutes);
+  // Fetch AI Klyn Wrapped insights from /api/gemini/wrapped
+  const topArtistKey = computedActivity.artistStats
+    .slice(0, 5)
+    .map((a) => `${a.artistName}:${a.plays}`)
+    .join('|');
+  const topSongKey = computedActivity.songStats
+    .slice(0, 5)
+    .map((s) => `${s.track.title}:${s.plays}`)
+    .join('|');
+  const genresKey = currentUser.favoriteGenres.join('|');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setIsLoadingWrapped(true);
+
+    const topArtists = computedActivity.artistStats.slice(0, 5).map((a) => a.artistName);
+    const topSongs = computedActivity.songStats
+      .slice(0, 5)
+      .map((s) => `${s.track.title} — ${s.track.artist}`);
+
+    fetch('/api/gemini/wrapped', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        topArtists,
+        topSongs,
+        favoriteGenres: currentUser.favoriteGenres,
+        totalMinutes: computedActivity.totalMinutes,
+        period,
+      }),
+      signal: controller.signal,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: AiWrappedSummary | null) => {
+        if (!controller.signal.aborted && data) {
+          setAiWrapped(data);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!controller.signal.aborted) setIsLoadingWrapped(false);
+      });
+
+    return () => controller.abort();
+  }, [period, topArtistKey, topSongKey, genresKey, computedActivity.totalMinutes]);
+
+  // Fetch real Deezer circular portraits for Most Played Artists
+  useEffect(() => {
+    if (computedActivity.artistStats.length === 0) return;
+    let cancelled = false;
+    computedActivity.artistStats.forEach((stat) => {
+      const cached = getCachedArtistPhoto(stat.artistName);
+      if (cached) {
+        setArtistPhotos((prev) =>
+          prev[stat.artistName] ? prev : { ...prev, [stat.artistName]: cached },
+        );
+        return;
+      }
+      const fallback = artistCoverMap.get(stat.artistName) ?? '';
+      fetchRealArtistPhoto(stat.artistName, fallback).then((url) => {
+        if (!cancelled && url) {
+          setArtistPhotos((prev) => ({ ...prev, [stat.artistName]: url }));
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [computedActivity.artistStats, artistCoverMap]);
+
+  // Debounced Firestore public directory lookup in Friends & Social
+  useEffect(() => {
+    if (subPage !== 'Friends & Social') return;
+    const clean = userSearch.trim();
+    if (clean.length < 1) {
+      setRemotePublicUsers([]);
+      setIsSearchingDirectory(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsSearchingDirectory(true);
+    const timer = window.setTimeout(() => {
+      searchPublicProfilesFromFirestore(clean, currentUser.uid)
+        .then((rows) => {
+          if (!cancelled) setRemotePublicUsers(rows);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) setIsSearchingDirectory(false);
+        });
+    }, 320);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [userSearch, subPage, currentUser.uid]);
 
   const maxMinutes = Math.max(...computedActivity.dailyBars.map((b) => b.minutes), 1);
   const topTrack = computedActivity.topTrack;
@@ -359,61 +454,31 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
     tracks.find((t) => t.artist === activeArtistDetail?.artistName) ??
     null;
 
-  // Merge stored real local accounts (excluding current user) into discoverable community directory
+  // Merge existing friends + live Firestore public_profiles directory (real users only)
   const availableUsers = useMemo(() => {
     const existingIds = new Set(socialUsers.map((u) => u.id));
     const existingHandles = new Set(socialUsers.map((u) => u.handle.toLowerCase()));
     const merged: SocialUser[] = [...socialUsers];
 
-    loadSavedAccounts().forEach((acct) => {
-      if (acct.id === currentUser.id || acct.email.toLowerCase() === currentUser.email.toLowerCase()) {
-        return;
+    for (const remote of remotePublicUsers) {
+      if (!existingIds.has(remote.id) && !existingHandles.has(remote.handle.toLowerCase())) {
+        existingIds.add(remote.id);
+        existingHandles.add(remote.handle.toLowerCase());
+        merged.push(remote);
       }
-      if (existingIds.has(acct.id) || existingHandles.has(acct.handle.toLowerCase())) {
-        return;
-      }
-      merged.push({
-        id: acct.id,
-        name: acct.name,
-        handle: acct.handle,
-        initials: acct.initials,
-        isFriend: false,
-        isOnline: false,
-        currentTrackId: '',
-        lastActiveLabel: 'On this device',
-        topTrackIds: [],
-        tasteMatchPct: 84,
-        accentColor: acct.accentColor || '#7D2332',
-      });
-    });
+    }
 
     return merged;
-  }, [socialUsers, currentUser.id, currentUser.email]);
+  }, [socialUsers, remotePublicUsers]);
 
   const friends = useMemo(() => availableUsers.filter((u) => u.isFriend), [availableUsers]);
   const searchedUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
-    if (!q) return availableUsers;
+    if (!q) return friends;
     return availableUsers.filter(
       (u) => u.name.toLowerCase().includes(q) || u.handle.toLowerCase().includes(q),
     );
-  }, [availableUsers, userSearch]);
-
-  const cleanSearchHandle = useMemo(() => {
-    const clean = userSearch.trim().replace(/^@+/, '');
-    return clean;
-  }, [userSearch]);
-
-  const hasExactSearchMatch = useMemo(() => {
-    if (!cleanSearchHandle) return true;
-    const qLower = cleanSearchHandle.toLowerCase();
-    return availableUsers.some(
-      (u) =>
-        u.name.toLowerCase() === qLower ||
-        u.handle.toLowerCase() === `@${qLower}` ||
-        u.handle.toLowerCase() === qLower,
-    );
-  }, [availableUsers, cleanSearchHandle]);
+  }, [availableUsers, friends, userSearch]);
 
   const blendFriend =
     availableUsers.find((u) => u.id === selectedBlendFriendId) ??
@@ -437,8 +502,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
     return tracks.slice(0, 5);
   }, [listeningStats.trackPlayCounts, favoriteIds, blendFriend, trackById, tracks]);
 
-  const activePlayingTrack =
-    activeTrack ?? trackById.get(activeTrackId) ?? tracks[0] ?? null;
+  const activePlayingTrack = activeTrack ?? trackById.get(activeTrackId) ?? tracks[0] ?? null;
 
   const handlePartySend = (e: React.FormEvent) => {
     e.preventDefault();
@@ -449,7 +513,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
   };
 
   return (
-    <div className="space-y-5 pb-8">
+    <div className="space-y-6 pb-40">
       {/* Header + Sub-page Pill Switcher */}
       <div className="flex flex-col gap-3 pt-1">
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
@@ -513,145 +577,167 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
         )}
       </div>
 
-      {/* ================= SUB-PAGE 1: MY ACTIVITY ================= */}
+      {/* ================= SUB-PAGE 1: COMPACT 4-SECTION MY ACTIVITY ================= */}
       {subPage === 'My Activity' && (
-        <>
-          {/* Compact Listening Streak Strip */}
-          <section aria-label="Listening streak notification">
-            <div className="liquid-glass rounded-2xl px-4 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/12 border border-white/18">
-                    <Flame className="h-4 w-4 text-white" />
+        <div className="space-y-6">
+          {/* 1. AI Klyn Wrapped + Compact Listening Time / Plays / Mon-Sun Bar */}
+          <section aria-label="AI Klyn Wrapped and listening overview" className="space-y-3.5">
+            <div
+              className="liquid-glass-elevated relative overflow-hidden rounded-3xl p-5"
+              style={{
+                background: `radial-gradient(circle at 88% 15%, ${
+                  topTrack?.primaryColor ?? '#52525b'
+                }45 0%, rgba(20,20,24,0.82) 55%, rgba(10,10,12,0.96) 100%)`,
+              }}
+            >
+              <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <div className="inline-flex items-center gap-1.5 text-[10px] font-bold tracking-[0.16em] uppercase text-white/70">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>Klyn Wrapped · {period}</span>
+                    {isLoadingWrapped && <Loader2 className="h-3 w-3 animate-spin ml-1" />}
                   </div>
-                  <div className="min-w-0">
-                    <p className="text-sm font-bold text-white truncate">
-                      {computedActivity.streakDays}-Day Streak{' '}
-                      <span className="font-normal text-xs text-white/60 tabular-nums">
-                        · {todayMinutes}/30m goal{' '}
-                        {dailyGoalRemaining > 0 ? `(${dailyGoalRemaining}m left)` : 'completed'}
+                  <h2 className="font-display text-xl sm:text-2xl font-bold text-white">
+                    {aiWrapped?.headline || `${computedActivity.vibeLabel} Rotation`}
+                  </h2>
+                  <p className="text-xs sm:text-sm text-white/75 leading-relaxed max-w-2xl">
+                    {aiWrapped?.summary ||
+                      `You logged ${computedActivity.totalTime} across ${computedActivity.tracksPlayed} plays${
+                        computedActivity.topArtistName !== 'No Top Artist Yet'
+                          ? ` led by ${computedActivity.topArtistName}`
+                          : ''
+                      }.`}
+                  </p>
+                  {aiWrapped?.vibeTags && aiWrapped.vibeTags.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                      <span className="rounded-full bg-white text-black px-2.5 py-0.5 text-[10px] font-bold">
+                        {aiWrapped.persona}
                       </span>
-                    </p>
+                      {aiWrapped.vibeTags.slice(0, 3).map((tag) => (
+                        <span
+                          key={tag}
+                          className="rounded-full bg-white/10 px-2.5 py-0.5 text-[10px] font-medium text-white/80"
+                        >
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {topTrack && (
+                  <div className="flex items-center gap-3 shrink-0">
+                    <CoverArt
+                      src={topTrack.coverUrl}
+                      alt={topTrack.title}
+                      fallbackGradient={topTrack.fallbackGradient}
+                      className="h-16 w-16 rounded-2xl shadow-xl"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (topTrack.id === activeTrackId) onTogglePlay();
+                        else onPlayTrack(topTrack, artistTracks.length ? artistTracks : tracks);
+                      }}
+                      aria-label={isTopTrackPlaying ? 'Pause top track' : 'Play top track'}
+                      className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black hover:scale-105 active:scale-95 transition-transform"
+                    >
+                      {isTopTrackPlaying ? (
+                        <Pause className="h-4 w-4 fill-current" />
+                      ) : (
+                        <Play className="h-4 w-4 fill-current translate-x-0.5" />
+                      )}
+                    </button>
                   </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setStreakAlertEnabled((v) => !v)}
-                  className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-semibold transition-colors ${
-                    streakAlertEnabled
-                      ? 'bg-white text-black'
-                      : 'bg-white/10 text-white/80 hover:bg-white/18'
-                  }`}
-                >
-                  <BellRing className="h-3 w-3" />
-                  <span>{streakAlertEnabled ? 'Alerts On' : 'Alerts Off'}</span>
-                </button>
-              </div>
-
-              <div className="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-white/10">
-                <div
-                  className="h-full rounded-full bg-white/90 transition-all duration-500"
-                  style={{ width: `${dailyGoalPct}%` }}
-                />
-              </div>
-            </div>
-          </section>
-
-          {/* Compact KPI Strip + Mon-Sun Daily Rhythm */}
-          <section aria-label="Listening activity overview" className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
-            <div className="grid grid-cols-3 lg:grid-cols-1 gap-2.5 lg:col-span-4">
-              <div className="liquid-glass rounded-2xl p-3.5">
-                <div className="flex items-center gap-1.5 text-[11px] font-medium text-white/55">
-                  <Clock className="h-3 w-3 shrink-0" />
-                  <span className="truncate">Time</span>
-                </div>
-                <p className="font-display mt-1 text-lg sm:text-2xl font-bold text-white tabular-nums truncate">
-                  {computedActivity.totalTime}
-                </p>
-              </div>
-
-              <div className="liquid-glass rounded-2xl p-3.5">
-                <div className="flex items-center gap-1.5 text-[11px] font-medium text-white/55">
-                  <Activity className="h-3 w-3 shrink-0" />
-                  <span className="truncate">Plays</span>
-                </div>
-                <p className="font-display mt-1 text-lg sm:text-2xl font-bold text-white tabular-nums">
-                  {computedActivity.tracksPlayed.toLocaleString()}
-                </p>
-              </div>
-
-              <div className="liquid-glass rounded-2xl p-3.5">
-                <div className="flex items-center gap-1.5 text-[11px] font-medium text-white/55">
-                  <Flame className="h-3 w-3 shrink-0" />
-                  <span className="truncate">Streak</span>
-                </div>
-                <p className="font-display mt-1 text-lg sm:text-2xl font-bold text-white tabular-nums">
-                  {computedActivity.streakDays}d
-                </p>
-              </div>
-            </div>
-
-            <div className="liquid-glass flex flex-col justify-between rounded-2xl p-4 lg:col-span-8">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h2 className="font-display text-base font-bold text-white">Daily Rhythm</h2>
-                  <p className="text-[11px] text-white/55">Mon – Sun listening minutes</p>
-                </div>
-                {hoveredDay && (
-                  <span className="text-xs font-semibold text-white/85 tabular-nums">
-                    {hoveredDay} ·{' '}
-                    {computedActivity.dailyBars.find((d) => d.day === hoveredDay)?.minutes ?? 0}m
-                  </span>
                 )}
               </div>
+            </div>
 
-              <div className="mt-3 grid grid-cols-7 items-end gap-2 sm:gap-3 h-28 sm:h-32 pt-2">
-                {computedActivity.dailyBars.map((bar) => {
-                  const heightPct =
-                    bar.minutes > 0
-                      ? Math.max(16, Math.round((bar.minutes / maxMinutes) * 100))
-                      : 10;
-                  const isSelected = hoveredDay === bar.day;
-                  return (
-                    <button
-                      key={`bar-${bar.day}`}
-                      type="button"
-                      onMouseEnter={() => setHoveredDay(bar.day)}
-                      onFocus={() => setHoveredDay(bar.day)}
-                      onClick={() => setHoveredDay(bar.day)}
-                      className="group flex h-full flex-col items-center justify-end gap-1.5 focus:outline-none"
-                    >
-                      <div className="relative flex w-full max-w-[30px] flex-1 items-end rounded-full bg-white/[0.06] p-1">
-                        <div
-                          className={`w-full rounded-full transition-all duration-500 ${
-                            bar.minutes === 0
-                              ? 'bg-white/15'
-                              : isSelected
-                                ? 'bg-white shadow-[0_0_14px_rgba(255,255,255,0.45)]'
-                                : 'bg-white/70 group-hover:bg-white'
-                          }`}
-                          style={{ height: `${heightPct}%` }}
-                        />
-                      </div>
-                      <span className="text-[10px] font-medium text-white/60">{bar.day}</span>
-                    </button>
-                  );
-                })}
+            {/* Compact Time + Plays KPIs (No Streaks) & Mon–Sun Daily Rhythm */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+              <div className="grid grid-cols-2 lg:grid-cols-1 gap-2.5 lg:col-span-4">
+                <div className="liquid-glass rounded-2xl p-3.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-white/55">
+                    <Clock className="h-3 w-3 shrink-0" />
+                    <span className="truncate">Time Listened</span>
+                  </div>
+                  <p className="font-display mt-1 text-xl sm:text-2xl font-bold text-white tabular-nums truncate">
+                    {computedActivity.totalTime}
+                  </p>
+                </div>
+
+                <div className="liquid-glass rounded-2xl p-3.5">
+                  <div className="flex items-center gap-1.5 text-[11px] font-medium text-white/55">
+                    <Activity className="h-3 w-3 shrink-0" />
+                    <span className="truncate">Total Plays</span>
+                  </div>
+                  <p className="font-display mt-1 text-xl sm:text-2xl font-bold text-white tabular-nums">
+                    {computedActivity.tracksPlayed.toLocaleString()}
+                  </p>
+                </div>
+              </div>
+
+              <div className="liquid-glass flex flex-col justify-between rounded-2xl p-4 lg:col-span-8">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-display text-base font-bold text-white">Daily Rhythm</h3>
+                    <p className="text-[11px] text-white/55">Mon – Sun listening minutes</p>
+                  </div>
+                  {hoveredDay && (
+                    <span className="text-xs font-semibold text-white/85 tabular-nums">
+                      {hoveredDay} ·{' '}
+                      {computedActivity.dailyBars.find((d) => d.day === hoveredDay)?.minutes ?? 0}m
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-3 grid grid-cols-7 items-end gap-2 sm:gap-3 h-24 sm:h-28 pt-2">
+                  {computedActivity.dailyBars.map((bar) => {
+                    const heightPct =
+                      bar.minutes > 0
+                        ? Math.max(16, Math.round((bar.minutes / maxMinutes) * 100))
+                        : 10;
+                    const isSelected = hoveredDay === bar.day;
+                    return (
+                      <button
+                        key={`bar-${bar.day}`}
+                        type="button"
+                        onMouseEnter={() => setHoveredDay(bar.day)}
+                        onFocus={() => setHoveredDay(bar.day)}
+                        onClick={() => setHoveredDay(bar.day)}
+                        className="group flex h-full flex-col items-center justify-end gap-1.5 focus:outline-none"
+                      >
+                        <div className="relative flex w-full max-w-[28px] flex-1 items-end rounded-full bg-white/[0.06] p-1">
+                          <div
+                            className={`w-full rounded-full transition-all duration-500 ${
+                              bar.minutes === 0
+                                ? 'bg-white/15'
+                                : isSelected
+                                  ? 'bg-white shadow-[0_0_14px_rgba(255,255,255,0.45)]'
+                                  : 'bg-white/70 group-hover:bg-white'
+                            }`}
+                            style={{ height: `${heightPct}%` }}
+                          />
+                        </div>
+                        <span className="text-[10px] font-medium text-white/60">{bar.day}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </section>
 
-          {/* HORIZONTAL MOST PLAYED ARTISTS (1ST TO LAST) */}
-          <section aria-label="Most played artists">
+          {/* 2. MOST LISTENED ARTISTS (#1 to last, Horizontal, Pure Borderless Circles) */}
+          <section aria-label="Most listened artists">
             <div className="mb-2.5 flex items-baseline justify-between">
               <h2 className="font-display text-lg sm:text-xl font-bold text-white">
-                Most Played Artists
+                Most Listened Artists
               </h2>
               <span className="text-xs text-white/50 tabular-nums">
                 {computedActivity.artistStats.length > 0
-                  ? `#1 – #${computedActivity.artistStats.length} · Tap to inspect`
-                  : 'Builds from your real plays'}
+                  ? `#1 – #${computedActivity.artistStats.length}`
+                  : 'Builds from plays'}
               </span>
             </div>
 
@@ -659,15 +745,19 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
               <div className="liquid-glass rounded-2xl p-5 text-center">
                 <p className="text-xs font-semibold text-white">No played artists yet</p>
                 <p className="mt-1 text-[11px] text-white/55">
-                  Play any song to populate your ranked artist strip from #1 onward.
+                  Play any song to populate your ranked artists horizontally from #1 onward.
                 </p>
               </div>
             ) : (
               <>
-                <div className="no-scrollbar flex snap-x snap-mandatory gap-3 overflow-x-auto pb-1.5 -mx-4 px-4 sm:mx-0 sm:px-0">
+                <div className="no-scrollbar flex snap-x snap-mandatory gap-5 overflow-x-auto pb-1.5 -mx-4 px-4 sm:mx-0 sm:px-0">
                   {computedActivity.artistStats.map((stat, idx) => {
-                    const coverUrl =
-                      artistCoverMap.get(stat.artistName) ?? topTrack?.coverUrl ?? '';
+                    const photoUrl =
+                      artistPhotos[stat.artistName] ||
+                      getCachedArtistPhoto(stat.artistName) ||
+                      artistCoverMap.get(stat.artistName) ||
+                      topTrack?.coverUrl ||
+                      '';
                     const isSelected = activeArtistDetail?.artistName === stat.artistName;
                     return (
                       <button
@@ -678,25 +768,30 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                             cur === stat.artistName ? null : stat.artistName,
                           )
                         }
-                        className={`liquid-glass flex w-32 sm:w-36 shrink-0 snap-start flex-col items-center rounded-2xl p-3 text-center transition-all ${
-                          isSelected
-                            ? 'border-white/35 bg-white/[0.12]'
-                            : 'hover:bg-white/[0.08]'
-                        }`}
+                        className="spring-card group flex w-24 shrink-0 snap-start flex-col items-center text-center focus:outline-none"
                       >
-                        <CoverArt
-                          src={coverUrl}
-                          alt={stat.artistName}
-                          className="h-14 w-14 rounded-full border border-white/20"
-                        />
+                        <div className="h-20 w-20 overflow-hidden rounded-full bg-zinc-900">
+                          {photoUrl ? (
+                            <img
+                              src={photoUrl}
+                              alt={stat.artistName}
+                              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                            />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-sm font-bold text-white/75">
+                              {stat.artistName.slice(0, 2).toUpperCase()}
+                            </div>
+                          )}
+                        </div>
                         <p className="mt-2 text-[10px] font-bold text-white/55 tabular-nums">
-                          #{idx + 1} · {stat.sharePct}%
+                          #{idx + 1} · {stat.plays} {stat.plays === 1 ? 'play' : 'plays'}
                         </p>
-                        <p className="mt-0.5 w-full truncate font-display text-xs sm:text-sm font-bold text-white">
+                        <p
+                          className={`mt-0.5 w-full truncate font-display text-xs font-bold ${
+                            isSelected ? 'text-white underline' : 'text-white'
+                          }`}
+                        >
                           {stat.artistName}
-                        </p>
-                        <p className="text-[10px] text-white/50 tabular-nums">
-                          {stat.plays} {stat.plays === 1 ? 'play' : 'plays'} · {stat.minutes}m
                         </p>
                       </button>
                     );
@@ -714,11 +809,12 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                         }
                         alt={activeArtistTopSong?.title ?? activeArtistDetail.artistName}
                         fallbackGradient={activeArtistTopSong?.fallbackGradient}
-                        className="h-11 w-11 shrink-0 rounded-xl border border-white/15"
+                        className="h-10 w-10 shrink-0 rounded-xl"
                       />
                       <div className="min-w-0">
                         <p className="text-[10px] font-semibold uppercase tracking-wider text-white/50">
-                          Top from {activeArtistDetail.artistName}
+                          <Award className="inline h-3 w-3 mr-1" />
+                          {activeArtistDetail.artistName} · {activeArtistDetail.sharePct}% share
                         </p>
                         <p className="truncate text-sm font-bold text-white">
                           {activeArtistTopSong?.title ?? activeArtistDetail.artistName}
@@ -763,11 +859,11 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
             )}
           </section>
 
-          {/* HORIZONTAL MOST PLAYED SONGS (1ST TO LAST) */}
-          <section aria-label="Most played songs">
+          {/* 3. HORIZONTAL MOST LISTENED SONGS (#1 to last, Clean Uncluttered Artwork Cards) */}
+          <section aria-label="Most listened songs">
             <div className="mb-2.5 flex items-baseline justify-between">
               <h2 className="font-display text-lg sm:text-xl font-bold text-white">
-                Most Played Songs
+                Most Listened Songs
               </h2>
               <span className="text-xs text-white/50 tabular-nums">
                 {computedActivity.songStats.length > 0
@@ -778,194 +874,68 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
 
             {computedActivity.songStats.length === 0 ? (
               <div className="liquid-glass rounded-2xl p-5 text-center">
-                <p className="text-xs font-semibold text-white">No played songs yet</p>
+                <p className="text-xs font-semibold text-white">No listened songs yet</p>
                 <p className="mt-1 text-[11px] text-white/55">
-                  Your most played tracks will scroll horizontally here from #1 onward.
+                  Your top tracks will scroll horizontally here from #1 onward.
                 </p>
               </div>
             ) : (
-              <div className="no-scrollbar flex snap-x snap-mandatory gap-3 overflow-x-auto pb-1.5 -mx-4 px-4 sm:mx-0 sm:px-0">
+              <div className="no-scrollbar flex snap-x snap-mandatory gap-4 overflow-x-auto pb-1.5 -mx-4 px-4 sm:mx-0 sm:px-0">
                 {computedActivity.songStats.map((item, idx) => {
                   const isCurrent = item.track.id === activeTrackId;
                   return (
-                    <div
+                    <button
                       key={`most-song-${item.track.id}-${idx}`}
-                      className={`liquid-glass group flex w-40 sm:w-44 shrink-0 snap-start flex-col rounded-2xl p-2.5 transition-all hover:bg-white/[0.09] ${
-                        isCurrent ? 'border-white/30 bg-white/[0.1]' : ''
+                      type="button"
+                      onClick={() => {
+                        if (isCurrent) {
+                          if (!isPlaying) onTogglePlay();
+                          onOpenPlayer();
+                        } else {
+                          onPlayTrack(
+                            item.track,
+                            computedActivity.songStats.map((s) => s.track),
+                          );
+                        }
+                      }}
+                      className={`spring-card group relative aspect-video w-60 sm:w-64 shrink-0 snap-start overflow-hidden rounded-2xl bg-zinc-950 text-left block ${
+                        isCurrent ? 'ring-1 ring-white/55' : ''
                       }`}
                     >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isCurrent) {
-                            if (!isPlaying) onTogglePlay();
-                            onOpenPlayer();
-                          } else {
-                            onPlayTrack(
-                              item.track,
-                              computedActivity.songStats.map((s) => s.track),
-                            );
-                          }
-                        }}
-                        className="relative aspect-square w-full overflow-hidden rounded-xl block"
-                      >
-                        <CoverArt
-                          src={item.track.coverUrl}
-                          alt={item.track.title}
-                          fallbackGradient={item.track.fallbackGradient}
-                          className="h-full w-full"
-                          imgClassName="transition-transform duration-500 group-hover:scale-105"
-                        />
-                      </button>
-                      <p className="mt-2 text-[10px] font-bold text-white/55 tabular-nums">
-                        #{idx + 1} · {item.plays} {item.plays === 1 ? 'play' : 'plays'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (isCurrent) {
-                            if (!isPlaying) onTogglePlay();
-                            onOpenPlayer();
-                          } else {
-                            onPlayTrack(
-                              item.track,
-                              computedActivity.songStats.map((s) => s.track),
-                            );
-                          }
-                        }}
-                        className="mt-0.5 block w-full truncate text-left text-xs sm:text-sm font-semibold text-white"
-                      >
-                        {item.track.title}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onOpenArtist(item.track.artist)}
-                        className="block w-full truncate text-left text-[11px] text-white/55 hover:text-white hover:underline"
-                      >
-                        {item.track.artist} · {formatTime(item.track.duration)}
-                      </button>
-                    </div>
+                      <CoverArt
+                        src={item.track.coverUrl}
+                        alt={item.track.title}
+                        fallbackGradient={item.track.fallbackGradient}
+                        className="h-full w-full transition-transform duration-300 group-hover:scale-105"
+                      />
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"
+                      />
+                      <div className="absolute inset-x-0 bottom-0 z-10 p-3.5">
+                        <p className="truncate text-sm font-bold text-white leading-tight">
+                          #{idx + 1} · {item.track.title}
+                        </p>
+                        <p className="mt-0.5 truncate text-xs text-white/75">
+                          {item.track.artist} · {item.plays} {item.plays === 1 ? 'play' : 'plays'}
+                        </p>
+                      </div>
+                    </button>
                   );
                 })}
               </div>
             )}
           </section>
 
-          {/* Compact #1 Artist Spotlight + Klyn Wrapped Strip */}
-          <section aria-label="Artist spotlight and Klyn Wrapped" className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
-            <div className="liquid-glass relative overflow-hidden rounded-2xl p-4">
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute -right-10 -top-10 h-36 w-36 rounded-full opacity-30 blur-2xl"
-                style={{ background: topTrack?.primaryColor ?? '#3f3f46' }}
-              />
-              <div className="relative z-10 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <button
-                    type="button"
-                    disabled={!topTrack}
-                    onClick={() => topTrack && onOpenArtist(computedActivity.topArtistName)}
-                    className="shrink-0 rounded-full"
-                  >
-                    <CoverArt
-                      src={
-                        artistCoverMap.get(computedActivity.topArtistName) ??
-                        topTrack?.coverUrl ??
-                        ''
-                      }
-                      alt={computedActivity.topArtistName}
-                      className="h-14 w-14 rounded-full border border-white/20"
-                    />
-                  </button>
-                  <div className="min-w-0">
-                    <div className="inline-flex items-center gap-1 text-[10px] font-bold tracking-[0.12em] uppercase text-white/55">
-                      <Award className="h-3 w-3" />
-                      <span>#1 Artist · {computedActivity.topArtistPlays} plays</span>
-                    </div>
-                    <h3 className="font-display truncate text-lg font-bold text-white">
-                      {computedActivity.topArtistName}
-                    </h3>
-                    <p className="truncate text-xs text-white/55">
-                      {topTrack ? `Top track: ${topTrack.title}` : 'Play songs to crown #1'}
-                    </p>
-                  </div>
-                </div>
-
-                {topTrack && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (topTrack.id === activeTrackId) onTogglePlay();
-                      else onPlayTrack(topTrack, artistTracks.length ? artistTracks : tracks);
-                    }}
-                    aria-label={isTopTrackPlaying ? 'Pause top track' : 'Play top track'}
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-black hover:scale-105 active:scale-95 transition-transform"
-                  >
-                    {isTopTrackPlaying ? (
-                      <Pause className="h-4 w-4 fill-current" />
-                    ) : (
-                      <Play className="h-4 w-4 fill-current translate-x-0.5" />
-                    )}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div
-              className="liquid-glass-elevated relative overflow-hidden rounded-2xl p-4"
-              style={{
-                background: `radial-gradient(circle at 85% 20%, ${
-                  topTrack?.primaryColor ?? '#52525b'
-                }40 0%, rgba(24,24,27,0.72) 55%, rgba(12,12,15,0.92) 100%)`,
-              }}
-            >
-              <div className="relative z-10 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3.5 min-w-0">
-                  {topTrack && (
-                    <CoverArt
-                      src={topTrack.coverUrl}
-                      alt={topTrack.title}
-                      fallbackGradient={topTrack.fallbackGradient}
-                      className="h-14 w-14 shrink-0 rounded-xl border border-white/15"
-                    />
-                  )}
-                  <div className="min-w-0">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-bold tracking-[0.14em] uppercase text-white/70">
-                      <Sparkles className="h-3 w-3" />
-                      <span>Klyn Wrapped · {period}</span>
-                    </span>
-                    <h3 className="font-display truncate text-lg font-bold text-white">
-                      {topTrack ? topTrack.title : 'Ready to Generate Wrapped'}
-                    </h3>
-                    <p className="truncate text-xs text-white/60">
-                      {topTrack
-                        ? `${computedActivity.topArtistName} · ${computedActivity.vibeLabel}`
-                        : 'Play a track to unlock Story card'}
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={!topTrack}
-                  onClick={() => setIsStoryModalOpen(true)}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-white px-3.5 py-2 text-xs font-semibold text-black hover:scale-[1.02] active:scale-95 transition-transform disabled:opacity-40"
-                >
-                  <Share2 className="h-3.5 w-3.5" />
-                  <span>Story</span>
-                </button>
-              </div>
-            </div>
-          </section>
-
-          {/* Compact Recent Listening Log */}
-          <section aria-label="Recent listening log">
+          {/* 4. RECENTLY LISTENED PREVIEW */}
+          <section aria-label="Recently listened preview">
             <div className="mb-2.5 flex items-baseline justify-between">
               <h2 className="font-display text-lg sm:text-xl font-bold text-white">
-                Recent Listening Log
+                Recently Listened
               </h2>
               <span className="text-xs text-white/50 tabular-nums">
-                {recentLog.length} recent {recentLog.length === 1 ? 'entry' : 'entries'}
+                {Math.min(recentLog.length, 5)} recent{' '}
+                {Math.min(recentLog.length, 5) === 1 ? 'entry' : 'entries'}
               </span>
             </div>
 
@@ -978,7 +948,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
               </div>
             ) : (
               <div className="liquid-glass divide-y divide-white/[0.07] rounded-2xl px-2 sm:px-3.5">
-                {recentLog.map((entry, idx) => {
+                {recentLog.slice(0, 5).map((entry, idx) => {
                   const track = trackById.get(entry.trackId);
                   if (!track) return null;
                   const isCurrent = track.id === activeTrackId;
@@ -1056,7 +1026,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
               </div>
             )}
           </section>
-        </>
+        </div>
       )}
 
       {/* ================= SUB-PAGE 2: FRIENDS & SOCIAL ================= */}
@@ -1090,7 +1060,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                   </button>
                 </div>
 
-                {/* Synced Now Playing inside Party */}
                 {activePlayingTrack && (
                   <div className="flex items-center justify-between gap-3 rounded-2xl bg-white/[0.07] border border-white/15 p-3">
                     <div className="flex items-center gap-3 min-w-0">
@@ -1123,7 +1092,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                   </div>
                 )}
 
-                {/* Shared Song Selector */}
                 {tracks.length > 0 && (
                   <div className="rounded-2xl bg-white/[0.04] border border-white/10 p-3 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1178,7 +1146,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                   </div>
                 )}
 
-                {/* Party Chat & Sync Events */}
                 <div className="space-y-2 max-h-40 overflow-y-auto glass-scroll">
                   {partyMessages.map((msg, idx) => (
                     <div
@@ -1213,7 +1180,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
             </section>
           )}
 
-          {/* User Search & Add Friend + Saved Profiles */}
+          {/* User Search & Firestore Public Directory */}
           <section aria-label="Search users and add friends" className="space-y-3.5">
             <div className="flex items-center justify-between">
               <h2 className="font-display text-xl font-bold text-white">Find Friends</h2>
@@ -1226,10 +1193,11 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                 type="search"
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
-                placeholder="Search saved profiles or add friend by @handle..."
+                placeholder="Search KLYN members by name or @handle..."
                 aria-label="Search users"
                 className="w-full bg-transparent text-sm text-white placeholder:text-white/40 focus:outline-none"
               />
+              {isSearchingDirectory && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-white/60" />}
               {userSearch && (
                 <button
                   type="button"
@@ -1241,38 +1209,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
               )}
             </div>
 
-            {/* Invite / Add custom friend action when typing a handle */}
-            {cleanSearchHandle.length >= 2 && !hasExactSearchMatch && (
-              <div className="liquid-glass flex items-center justify-between gap-3 rounded-3xl px-4 py-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold text-white truncate">
-                    Invite @{cleanSearchHandle.toLowerCase().replace(/\s+/g, '')}
-                  </p>
-                  <p className="text-xs text-white/55">
-                    Add to your real friend list for Klyn AI Blends &amp; Listen Parties
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onAddCustomFriend(cleanSearchHandle);
-                    setUserSearch('');
-                  }}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-white px-4 py-2 text-xs font-semibold text-black hover:scale-[1.02] transition-transform"
-                >
-                  <UserPlus className="h-3.5 w-3.5" />
-                  <span>Add Friend</span>
-                </button>
-              </div>
-            )}
-
-            {searchedUsers.length === 0 ? (
-              <div className="liquid-glass rounded-3xl p-6 text-center text-xs text-white/60">
-                {availableUsers.length === 0
-                  ? 'No other user accounts or added friends yet. Enter any @handle above to add a friend or sign up another profile.'
-                  : `No users match "${userSearch}".`}
-              </div>
-            ) : (
+            {searchedUsers.length > 0 ? (
               <div className="liquid-glass divide-y divide-white/[0.07] rounded-3xl px-3">
                 {searchedUsers.map((user, idx) => {
                   const isKnownInState = socialUsers.some((s) => s.id === user.id);
@@ -1282,9 +1219,20 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                       className="flex flex-wrap items-center justify-between gap-3 py-3 px-2"
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/12 border border-white/18 font-display text-xs font-bold text-white">
-                          <span>{user.initials}</span>
-                        </div>
+                        {user.avatarUrl ? (
+                          <img
+                            src={user.avatarUrl}
+                            alt={user.name}
+                            className="h-11 w-11 shrink-0 rounded-full object-cover"
+                          />
+                        ) : (
+                          <div
+                            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full font-display text-xs font-bold text-white"
+                            style={{ backgroundColor: user.accentColor || '#27272a' }}
+                          >
+                            <span>{user.initials}</span>
+                          </div>
+                        )}
                         <div className="min-w-0">
                           <p className="truncate text-sm font-semibold text-white">{user.name}</p>
                           <p className="truncate text-xs text-white/55">
@@ -1337,7 +1285,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                   );
                 })}
               </div>
-            )}
+            ) : null}
           </section>
 
           {/* Friends' Live & Recent Listening Activity */}
@@ -1368,9 +1316,20 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                     >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/14 border border-white/18 text-xs font-bold text-white">
-                            {friend.initials}
-                          </div>
+                          {friend.avatarUrl ? (
+                            <img
+                              src={friend.avatarUrl}
+                              alt={friend.name}
+                              className="h-9 w-9 shrink-0 rounded-full object-cover"
+                            />
+                          ) : (
+                            <div
+                              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white"
+                              style={{ backgroundColor: friend.accentColor || '#27272a' }}
+                            >
+                              {friend.initials}
+                            </div>
+                          )}
                           <div className="min-w-0">
                             <p className="truncate text-sm font-semibold text-white">
                               {friend.name}
@@ -1477,9 +1436,7 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
                               key={`${sb.id}-${sbIdx}`}
                               className="flex items-center justify-between gap-2 text-xs"
                             >
-                              <span className="truncate font-medium text-white/90">
-                                {sb.title}
-                              </span>
+                              <span className="truncate font-medium text-white/90">{sb.title}</span>
                               <span className="shrink-0 text-[11px] text-white/55 tabular-nums">
                                 {sb.matchPct}% · {sb.trackIds.length} songs
                               </span>
@@ -1626,7 +1583,6 @@ export const ActivityView: React.FC<ActivityViewProps> = ({
         period={period}
         totalTime={computedActivity.totalTime}
         tracksPlayed={computedActivity.tracksPlayed}
-        streakDays={computedActivity.streakDays}
         artistStats={computedActivity.artistStats}
         tracks={tracks}
       />

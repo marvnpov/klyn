@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Check, Copy, Download, Share2, Sparkles, X } from 'lucide-react';
 import { ActivityPeriod, Track } from '../types/music';
-import { BrandLogo } from './BrandLogo';
+import { KlynLogo } from './KlynLogo';
 import { CoverArt } from './CoverArt';
 import { PillTabItem, SpringPillTabs } from './SpringPillTabs';
 
@@ -306,7 +306,7 @@ export const StoryShareModal: React.FC<StoryShareModalProps> = ({
                   {totalTime} · {tracksPlayed} plays
                 </span>
                 <span className="inline-flex items-center gap-1.5 font-display font-bold text-white">
-                  <BrandLogo className="h-4 w-4 rounded-[4px]" />
+                  <KlynLogo className="h-4 w-4 rounded-[4px]" />
                   <span>klyn</span>
                 </span>
               </div>

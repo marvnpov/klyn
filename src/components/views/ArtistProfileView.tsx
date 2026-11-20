@@ -6,6 +6,7 @@ import {
   BellRing,
   Check,
   Disc,
+  ExternalLink,
   Heart,
   Loader2,
   Pause,
@@ -14,6 +15,14 @@ import {
   UserPlus,
 } from 'lucide-react';
 import { formatTime } from '../../data/catalog';
+import { fetchRealArtistPhoto, getCachedArtistPhoto } from '../../services/artistProfiles';
+import {
+  formatSpotifyFollowers,
+  getSpotifyArtistAlbums,
+  getSpotifyArtistTopTracks,
+  searchSpotifyArtists,
+  SpotifyArtistProfile,
+} from '../../services/spotifyApi';
 import { ArtistAlbum, Track } from '../../types/music';
 import { lookupArtistCatalog } from '../../utils/itunesApi';
 import { CoverArt } from '../CoverArt';
@@ -58,9 +67,14 @@ export const ArtistProfileView: React.FC<ArtistProfileViewProps> = ({
   const [expandedAlbumId, setExpandedAlbumId] = useState<string | null>(null);
   const [isLoadingArtist, setIsLoadingArtist] = useState(false);
   const [fetchedAlbums, setFetchedAlbums] = useState<ArtistAlbum[]>([]);
+  const [spotifyArtist, setSpotifyArtist] = useState<SpotifyArtistProfile | null>(null);
+  const [artistPhoto, setArtistPhoto] = useState<string>(() => getCachedArtistPhoto(artistName) ?? '');
 
   const artistTracks = useMemo(
-    () => tracks.filter((t) => t.artist.toLowerCase() === artistName.toLowerCase()),
+    () =>
+      tracks
+        .filter((t) => t.artist.toLowerCase() === artistName.toLowerCase())
+        .sort((a, b) => (b.popularity ?? 50) - (a.popularity ?? 50)),
     [tracks, artistName],
   );
   const knownArtistId = useMemo(
@@ -69,26 +83,73 @@ export const ArtistProfileView: React.FC<ArtistProfileViewProps> = ({
   );
 
   useEffect(() => {
+    setArtistPhoto(getCachedArtistPhoto(artistName) ?? '');
+    setSpotifyArtist(null);
+    let cancelled = false;
+    fetchRealArtistPhoto(artistName).then((url) => {
+      if (!cancelled && url) setArtistPhoto(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [artistName]);
+
+  useEffect(() => {
     const controller = new AbortController();
     setIsLoadingArtist(true);
 
-    lookupArtistCatalog({ artistId: knownArtistId, artistName }, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        if (res.tracks.length > 0) {
-          onRegisterTracks?.(res.tracks);
-        }
-        if (res.albums.length > 0) {
-          setFetchedAlbums(res.albums);
-        }
-      })
-      .catch(() => {
-        // Resilient fallback to existing tracks
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setIsLoadingArtist(false);
-      });
+    const loadCatalog = async () => {
+      try {
+        const [itunesRes, spotifyMatches] = await Promise.all([
+          lookupArtistCatalog({ artistId: knownArtistId, artistName }, controller.signal).catch(
+            () => null,
+          ),
+          searchSpotifyArtists(artistName, 5, controller.signal).catch(() => []),
+        ]);
 
+        if (controller.signal.aborted) return;
+
+        const exactSpotify =
+          spotifyMatches.find((a) => a.name.toLowerCase() === artistName.toLowerCase()) ??
+          spotifyMatches[0] ??
+          null;
+
+        const collectedTracks: Track[] = [...(itunesRes?.tracks ?? [])];
+        const collectedAlbums: ArtistAlbum[] = [...(itunesRes?.albums ?? [])];
+
+        if (exactSpotify) {
+          setSpotifyArtist(exactSpotify);
+          if (exactSpotify.coverUrl) {
+            setArtistPhoto(exactSpotify.coverUrl);
+          }
+
+          const [spTopTracks, spAlbums] = await Promise.all([
+            getSpotifyArtistTopTracks(exactSpotify.id, 'US', controller.signal).catch(() => []),
+            getSpotifyArtistAlbums(exactSpotify.id, 16, controller.signal).catch(() => []),
+          ]);
+
+          if (!controller.signal.aborted) {
+            collectedTracks.push(...spTopTracks);
+            collectedAlbums.push(...spAlbums);
+          }
+        }
+
+        if (!controller.signal.aborted) {
+          if (collectedTracks.length > 0) {
+            onRegisterTracks?.(collectedTracks);
+          }
+          if (collectedAlbums.length > 0) {
+            setFetchedAlbums(collectedAlbums);
+          }
+        }
+      } catch {
+        // Resilient fallback to existing tracks
+      } finally {
+        if (!controller.signal.aborted) setIsLoadingArtist(false);
+      }
+    };
+
+    void loadCatalog();
     return () => controller.abort();
   }, [artistName, knownArtistId, onRegisterTracks]);
 
@@ -146,10 +207,10 @@ export const ArtistProfileView: React.FC<ArtistProfileViewProps> = ({
 
         <div className="relative z-10 flex flex-col sm:flex-row sm:items-center gap-6">
           <CoverArt
-            src={leadTrack?.coverUrl ?? ''}
+            src={artistPhoto || leadTrack?.coverUrl || ''}
             alt={artistName}
             fallbackGradient={leadTrack?.fallbackGradient}
-            className="h-32 w-32 sm:h-40 sm:w-40 shrink-0 rounded-full border border-white/20 shadow-2xl"
+            className="h-32 w-32 sm:h-40 sm:w-40 shrink-0 rounded-full shadow-2xl"
           />
 
           <div className="min-w-0 flex-1">
@@ -158,12 +219,20 @@ export const ArtistProfileView: React.FC<ArtistProfileViewProps> = ({
                 <BadgeCheck className="h-4 w-4" />
                 <span>Artist</span>
               </span>
-              {leadTrack && (
+              {(spotifyArtist?.genres[0] || leadTrack?.genre) && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span>{leadTrack.genre}</span>
+                  <span className="capitalize">
+                    {spotifyArtist?.genres.slice(0, 2).join(', ') || leadTrack?.genre}
+                  </span>
                 </>
               )}
+              {spotifyArtist?.followersTotal ? (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span>{formatSpotifyFollowers(spotifyArtist.followersTotal)}</span>
+                </>
+              ) : null}
               {isLoadingArtist && (
                 <>
                   <span aria-hidden="true">·</span>
@@ -186,6 +255,20 @@ export const ArtistProfileView: React.FC<ArtistProfileViewProps> = ({
                   ? 'Fetching artist discography from music catalog…'
                   : 'Explore releases and play full-length audio.'}
             </p>
+
+            {spotifyArtist?.spotifyUrl && (
+              <div className="mt-2">
+                <a
+                  href={spotifyArtist.spotifyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs font-semibold text-white/70 hover:text-white underline-offset-2 hover:underline"
+                >
+                  <span>Spotify Profile</span>
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+            )}
 
             {/* Primary Actions: Play + Follow / Following */}
             <div className="mt-5 flex flex-wrap items-center gap-3">

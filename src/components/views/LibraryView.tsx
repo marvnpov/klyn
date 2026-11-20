@@ -3,7 +3,9 @@ import {
   ArrowDownToLine,
   ArrowLeft,
   BellRing,
+  BookOpen,
   Check,
+  Headphones,
   Heart,
   ListMusic,
   Pause,
@@ -16,11 +18,14 @@ import {
   Trash2,
 } from 'lucide-react';
 import { formatTime } from '../../data/catalog';
+import { fetchRealArtistPhoto, getCachedArtistPhoto } from '../../services/artistProfiles';
 import { getOfflineStorageStats, OfflineStorageStats } from '../../services/offlineCache';
 import {
   LibrarySubTab,
   LikedSongsCustomization,
   PlaylistItem,
+  PodcastShow,
+  ShowProgressEntry,
   Track,
 } from '../../types/music';
 import { ACCENT_GRADIENT_PRESETS, CustomizePlaylistModal, CustomizePlaylistTarget } from '../CustomizePlaylistModal';
@@ -30,6 +35,8 @@ import { PillTabItem, SpringPillTabs } from '../SpringPillTabs';
 interface LibraryViewProps {
   tracks: Track[];
   playlists: PlaylistItem[];
+  shows: PodcastShow[];
+  showProgress: Record<string, ShowProgressEntry>;
   likedSongsCustomization: LikedSongsCustomization;
   activeTrackId: string;
   isPlaying: boolean;
@@ -44,6 +51,7 @@ interface LibraryViewProps {
   onDownloadTracks: (tracks: Track[], label?: string) => void;
   onClearDownloads: () => void;
   onOpenArtist: (artistName: string) => void;
+  onOpenShow: (show: PodcastShow) => void;
   onOpenAddToPlaylist: (track: Track) => void;
   onOpenCreatePlaylist: () => void;
   onOpenQueue: () => void;
@@ -58,12 +66,15 @@ const LIBRARY_TABS: PillTabItem<LibrarySubTab>[] = [
   { id: 'Playlists', label: 'Playlists' },
   { id: 'Albums', label: 'Albums' },
   { id: 'Artists', label: 'Artists' },
+  { id: 'Shows', label: 'Shows' },
   { id: 'Downloaded', label: 'Downloaded' },
 ];
 
 export const LibraryView: React.FC<LibraryViewProps> = ({
   tracks,
   playlists,
+  shows,
+  showProgress,
   likedSongsCustomization,
   activeTrackId,
   isPlaying,
@@ -78,6 +89,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   onDownloadTracks,
   onClearDownloads,
   onOpenArtist,
+  onOpenShow,
   onOpenAddToPlaylist,
   onOpenCreatePlaylist,
   onOpenQueue,
@@ -88,11 +100,11 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   onToggleTrackInPlaylist,
 }) => {
   const [subTab, setSubTab] = useState<LibrarySubTab>('Playlists');
-  // 'liked-songs' or playlist.id when opened
   const [openedCollectionId, setOpenedCollectionId] = useState<string | null>(null);
   const [customizeTarget, setCustomizeTarget] = useState<CustomizePlaylistTarget | null>(null);
   const [showAddSongsDrawer, setShowAddSongsDrawer] = useState(false);
   const [storageStats, setStorageStats] = useState<OfflineStorageStats | null>(null);
+  const [artistPhotos, setArtistPhotos] = useState<Record<string, string>>({});
   const lastStatsKeyRef = useRef<string>('');
 
   useEffect(() => {
@@ -150,6 +162,27 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
     () => artists.filter(([name]) => followedArtists.has(name)),
     [artists, followedArtists],
   );
+
+  // Preload real borderless artist portraits when viewing Artists tab
+  useEffect(() => {
+    if (subTab !== 'Artists' || artists.length === 0) return;
+    let cancelled = false;
+    artists.slice(0, 24).forEach(([artistName, artTracks]) => {
+      const cached = getCachedArtistPhoto(artistName);
+      if (cached) {
+        setArtistPhotos((prev) => (prev[artistName] ? prev : { ...prev, [artistName]: cached }));
+        return;
+      }
+      fetchRealArtistPhoto(artistName, artTracks[0]?.coverUrl ?? '').then((url) => {
+        if (!cancelled && url) {
+          setArtistPhotos((prev) => ({ ...prev, [artistName]: url }));
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [subTab, artists]);
 
   const activePlaylist =
     openedCollectionId && openedCollectionId !== 'liked-songs'
@@ -843,48 +876,51 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
         </div>
       )}
 
-      {/* Artists Tab */}
+      {/* Artists Tab (Pure Borderless Circular Portraits) */}
       {subTab === 'Artists' && (
-        <div className="space-y-6">
+        <div className="space-y-8">
           {followedArtistEntries.length > 0 && (
             <section aria-label="Following artists">
-              <div className="mb-3 flex items-center justify-between">
+              <div className="mb-3.5 flex items-center justify-between">
                 <h2 className="font-display text-lg font-bold text-white">Following Artists</h2>
                 <span className="text-xs text-white/50 tabular-nums">
                   {followedArtistEntries.length} followed
                 </span>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-5">
                 {followedArtistEntries.map(([artistName, artistTracks], idx) => {
                   const lead = artistTracks[0];
+                  const photoUrl =
+                    artistPhotos[artistName] ||
+                    getCachedArtistPhoto(artistName) ||
+                    lead?.coverUrl ||
+                    '';
                   return (
                     <button
                       key={`followed-${artistName}-${idx}`}
                       type="button"
                       onClick={() => onOpenArtist(artistName)}
-                      className="liquid-glass flex items-center gap-3.5 rounded-2xl p-3 text-left hover:bg-white/[0.09] transition-colors"
+                      className="spring-card group flex flex-col items-center text-center"
                     >
-                      <CoverArt
-                        src={lead?.coverUrl ?? ''}
-                        alt={artistName}
-                        fallbackGradient={lead?.fallbackGradient}
-                        className="h-14 w-14 shrink-0 rounded-full border border-white/20"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate font-display text-base font-bold text-white">
-                          {artistName}
-                        </p>
-                        <p className="truncate text-xs text-white/55">
-                          {`${artistTracks.length} ${artistTracks.length === 1 ? 'release' : 'releases'}`}
-                        </p>
-                        <span className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-white/75">
-                          <BellRing className="h-3 w-3" />
-                          <span>New release alerts on</span>
-                        </span>
+                      <div className="h-24 w-24 sm:h-28 sm:w-28 overflow-hidden rounded-full bg-zinc-900">
+                        {photoUrl ? (
+                          <img
+                            src={photoUrl}
+                            alt={artistName}
+                            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                          />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center text-lg font-bold text-white/75">
+                            {artistName.slice(0, 2).toUpperCase()}
+                          </div>
+                        )}
                       </div>
-                      <span className="inline-flex items-center gap-1 rounded-full bg-white/14 px-2.5 py-1 text-[11px] font-semibold text-white">
-                        <Check className="h-3 w-3" />
-                        <span>Following</span>
+                      <p className="mt-2.5 w-full truncate font-display text-xs sm:text-sm font-bold text-white">
+                        {artistName}
+                      </p>
+                      <span className="mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium text-white/55">
+                        <BellRing className="h-2.5 w-2.5" />
+                        <span>Alerts on</span>
                       </span>
                     </button>
                   );
@@ -894,41 +930,97 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
           )}
 
           <section aria-label="All artists">
-            <h2 className="font-display mb-3 text-lg font-bold text-white">All Artists</h2>
-            <div className="liquid-glass divide-y divide-white/[0.07] rounded-3xl px-3">
+            <h2 className="font-display mb-4 text-lg font-bold text-white">All Artists</h2>
+            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-5">
               {artists.map(([artistName, artistTracks], idx) => {
                 const lead = artistTracks[0];
-                const isFollowed = followedArtists.has(artistName);
+                const photoUrl =
+                  artistPhotos[artistName] ||
+                  getCachedArtistPhoto(artistName) ||
+                  lead?.coverUrl ||
+                  '';
                 return (
                   <button
                     key={`lib-art-${artistName}-${idx}`}
                     type="button"
                     onClick={() => onOpenArtist(artistName)}
-                    className="flex w-full items-center gap-4 py-3.5 px-2 text-left hover:bg-white/[0.04] rounded-2xl transition-colors"
+                    className="spring-card group flex flex-col items-center text-center"
                   >
-                    <CoverArt
-                      src={lead.coverUrl}
-                      alt={artistName}
-                      fallbackGradient={lead.fallbackGradient}
-                      className="h-14 w-14 shrink-0 rounded-full border border-white/15"
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate font-display text-base font-bold text-white">
-                        {artistName}
-                      </p>
-                      <p className="truncate text-xs text-white/55">
-                        {artistTracks.length} {artistTracks.length === 1 ? 'release' : 'releases'} ·{' '}
-                        {lead.genre}
-                      </p>
+                    <div className="h-20 w-20 sm:h-24 sm:w-24 overflow-hidden rounded-full bg-zinc-900">
+                      {photoUrl ? (
+                        <img
+                          src={photoUrl}
+                          alt={artistName}
+                          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-sm font-bold text-white/75">
+                          {artistName.slice(0, 2).toUpperCase()}
+                        </div>
+                      )}
                     </div>
-                    <span className="text-xs font-medium text-white/60">
-                      {isFollowed ? 'Following' : 'View'}
-                    </span>
+                    <p className="mt-2 w-full truncate font-display text-xs sm:text-sm font-semibold text-white">
+                      {artistName}
+                    </p>
                   </button>
                 );
               })}
             </div>
           </section>
+        </div>
+      )}
+
+      {/* Shows Tab (Podcasts & Audiobooks) */}
+      {subTab === 'Shows' && (
+        <div className="space-y-4">
+          {shows.length === 0 ? (
+            <div className="liquid-glass rounded-3xl p-8 text-center space-y-2">
+              <Headphones className="mx-auto h-7 w-7 text-white/45" />
+              <p className="text-sm font-semibold text-white">Podcasts &amp; Audiobooks</p>
+              <p className="text-xs text-white/55">
+                Explore shows on Home or Search to resume episodes and audiobooks here.
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {shows.map((show, idx) => {
+                const prog = showProgress[show.id];
+                return (
+                  <button
+                    key={`lib-show-${show.id}-${idx}`}
+                    type="button"
+                    onClick={() => onOpenShow(show)}
+                    className="spring-card liquid-glass flex items-center gap-3.5 rounded-2xl p-3 text-left hover:bg-white/[0.09]"
+                  >
+                    <CoverArt
+                      src={show.coverUrl}
+                      alt={show.title}
+                      className="h-16 w-16 shrink-0 rounded-xl"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <span className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-white/55">
+                        {show.kind === 'audiobook' ? (
+                          <BookOpen className="h-3 w-3" />
+                        ) : (
+                          <Headphones className="h-3 w-3" />
+                        )}
+                        <span>{show.kind === 'audiobook' ? 'Audiobook' : 'Podcast'}</span>
+                      </span>
+                      <p className="truncate font-display text-sm font-bold text-white mt-0.5">
+                        {show.title}
+                      </p>
+                      <p className="truncate text-xs text-white/55">{show.author}</p>
+                      {prog && prog.position > 5 && (
+                        <p className="mt-1 text-[10px] font-semibold text-emerald-300 tabular-nums">
+                          Resume from {formatTime(prog.position)}
+                        </p>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 

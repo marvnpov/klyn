@@ -18,18 +18,20 @@ import {
   RefreshCw,
   Repeat,
   Repeat1,
-  Share2,
+  RotateCcw,
+  RotateCw,
   Shuffle,
   SkipBack,
   SkipForward,
   Smartphone,
+  Sparkles,
   Speaker,
   Trash2,
   X,
 } from 'lucide-react';
 import { useAudioDevices } from '../hooks/useAudioDevices';
 import { playerEngine } from '../services/playerEngine';
-import { RepeatMode, Track } from '../types/music';
+import { RepeatMode, ShuffleMode, Track } from '../types/music';
 import { CoverArt } from './CoverArt';
 import { ExpandingScrubber } from './ExpandingScrubber';
 import { FullLyricsView } from './FullLyricsView';
@@ -42,22 +44,24 @@ interface FullScreenPlayerProps {
   allTracks: Track[];
   isPlaying: boolean;
   currentTime: number;
-  isShuffled: boolean;
+  shuffleMode: ShuffleMode;
   repeatMode: RepeatMode;
+  playbackSpeed: number;
   isFavorite: boolean;
   isDownloaded: boolean;
   activeDeviceId: string;
   showLyrics: boolean;
   streamingQuality: string;
-  spatialEnabled: boolean;
   autoScrollLyrics: boolean;
   onClose: () => void;
   onToggleLyrics: (show: boolean) => void;
   onTogglePlay: () => void;
   onSeek: (time: number) => void;
+  onSkipBy: (seconds: number) => void;
+  onChangePlaybackSpeed: (speed: number) => void;
   onPrevTrack: () => void;
   onNextTrack: () => void;
-  onToggleShuffle: () => void;
+  onCycleShuffle: () => void;
   onCycleRepeat: () => void;
   onToggleFavorite: (trackId: string) => void;
   onToggleDownload: (track: Track) => void;
@@ -71,6 +75,8 @@ interface FullScreenPlayerProps {
   onOpenArtist: (artistName: string) => void;
 }
 
+const SPEED_STEPS = [1, 1.25, 1.5, 2];
+
 export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
   isOpen,
   track,
@@ -78,22 +84,24 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
   allTracks,
   isPlaying,
   currentTime,
-  isShuffled,
+  shuffleMode,
   repeatMode,
+  playbackSpeed,
   isFavorite,
   isDownloaded,
   activeDeviceId,
   showLyrics,
   streamingQuality,
-  spatialEnabled,
   autoScrollLyrics,
   onClose,
   onToggleLyrics,
   onTogglePlay,
   onSeek,
+  onSkipBy,
+  onChangePlaybackSpeed,
   onPrevTrack,
   onNextTrack,
-  onToggleShuffle,
+  onCycleShuffle,
   onCycleRepeat,
   onToggleFavorite,
   onToggleDownload,
@@ -107,7 +115,6 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
   onOpenArtist,
 }) => {
   const [drawerMode, setDrawerMode] = useState<'none' | 'queue' | 'devices' | 'options'>('none');
-  const [copiedNotice, setCopiedNotice] = useState(false);
   const ytHostRef = useRef<HTMLDivElement | null>(null);
   const {
     devices: audioDevices,
@@ -171,15 +178,17 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
     }
   };
 
-  const handleShare = () => {
-    setCopiedNotice(true);
-    if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(`${track.title} — ${track.artist} on klyn`).catch(() => {});
-    }
-    setTimeout(() => setCopiedNotice(false), 1800);
+  const isLongFormShow = Boolean(track.isPodcastEpisode || track.isAudiobookChapter);
+  const activeDeviceName =
+    audioDevices.find((d) => d.id === activeDeviceId)?.name ?? 'Devices';
+
+  const cyclePlaybackSpeed = () => {
+    const idx = SPEED_STEPS.indexOf(playbackSpeed);
+    const nextSpeed = SPEED_STEPS[(idx + 1) % SPEED_STEPS.length];
+    onChangePlaybackSpeed(nextSpeed);
   };
 
-  const qualityHint = `${streamingQuality}${spatialEnabled ? ' · Spatial' : ''}`;
+  const qualityHint = streamingQuality;
 
   return (
     <div
@@ -210,10 +219,16 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
             isPlaying={isPlaying}
             currentTime={currentTime}
             autoScrollLyrics={autoScrollLyrics}
+            shuffleMode={shuffleMode}
+            repeatMode={repeatMode}
+            activeDeviceName={activeDeviceName}
             onSeek={onSeek}
             onTogglePlay={onTogglePlay}
             onPrevTrack={onPrevTrack}
             onNextTrack={onNextTrack}
+            onCycleShuffle={onCycleShuffle}
+            onCycleRepeat={onCycleRepeat}
+            onOpenDevices={() => setDrawerMode('devices')}
             onExitLyrics={() => onToggleLyrics(false)}
             onCollapsePlayer={() => {
               onToggleLyrics(false);
@@ -406,16 +421,23 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
             <div className="flex items-center justify-between px-1 sm:px-4">
               <button
                 type="button"
-                onClick={onToggleShuffle}
-                aria-label="Toggle shuffle"
-                aria-pressed={isShuffled}
-                className={`flex h-11 w-11 items-center justify-center rounded-full transition-colors ${
-                  isShuffled
+                onClick={onCycleShuffle}
+                aria-label={`Shuffle mode: ${shuffleMode}`}
+                aria-pressed={shuffleMode !== 'off'}
+                className={`relative flex h-11 min-w-[44px] items-center justify-center gap-1 rounded-full px-2 transition-colors ${
+                  shuffleMode !== 'off'
                     ? 'bg-white/16 text-white'
                     : 'text-white/55 hover:bg-white/10 hover:text-white'
                 }`}
               >
-                <Shuffle className="h-4.5 w-4.5" />
+                {shuffleMode === 'smart' ? (
+                  <>
+                    <Sparkles className="h-4 w-4 shrink-0" />
+                    <span className="text-[10px] font-bold tracking-wide">Smart</span>
+                  </>
+                ) : (
+                  <Shuffle className="h-4.5 w-4.5" />
+                )}
               </button>
 
               <button
@@ -467,21 +489,55 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
               </button>
             </div>
 
-            {/* Bottom Action Pills: Lyrics, AirPlay / Devices, Up Next Queue */}
+            {/* Podcast / Audiobook ±15s Skip & Speed Controls */}
+            {isLongFormShow && (
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => onSkipBy(-15)}
+                  aria-label="Rewind 15 seconds"
+                  className="liquid-glass inline-flex h-9 items-center gap-1.5 rounded-full px-3.5 text-xs font-semibold text-white/90 hover:bg-white/14 active:scale-95 transition-all"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>-15s</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={cyclePlaybackSpeed}
+                  aria-label={`Playback speed ${playbackSpeed}x`}
+                  className="inline-flex h-9 min-w-[68px] items-center justify-center rounded-full bg-white text-black px-3.5 text-xs font-bold tabular-nums hover:scale-[1.03] active:scale-95 transition-transform"
+                >
+                  {playbackSpeed}x
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onSkipBy(15)}
+                  aria-label="Skip forward 15 seconds"
+                  className="liquid-glass inline-flex h-9 items-center gap-1.5 rounded-full px-3.5 text-xs font-semibold text-white/90 hover:bg-white/14 active:scale-95 transition-all"
+                >
+                  <span>+15s</span>
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Bottom Action Pills: Lyrics, Devices, Queue */}
             <div className="grid grid-cols-3 gap-2.5 pt-1">
               <button
                 type="button"
                 onClick={() => onToggleLyrics(true)}
-                className="liquid-glass flex h-11 items-center justify-center gap-2 rounded-full px-3 text-xs sm:text-sm font-medium text-white/90 hover:bg-white/14 active:scale-95 transition-all"
+                className="liquid-glass flex h-11 items-center justify-center gap-1.5 rounded-full px-3 text-xs sm:text-sm font-medium text-white/90 hover:bg-white/14 active:scale-95 transition-all"
               >
                 <Quote className="h-4 w-4 shrink-0" />
-                <span>Lyrics</span>
+                <span className="truncate">Lyrics</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setDrawerMode('devices')}
-                className="liquid-glass flex h-11 items-center justify-center gap-2 rounded-full px-3 text-xs sm:text-sm font-medium text-white/90 hover:bg-white/14 active:scale-95 transition-all"
+                className="liquid-glass flex h-11 items-center justify-center gap-1.5 rounded-full px-3 text-xs sm:text-sm font-medium text-white/90 hover:bg-white/14 active:scale-95 transition-all"
               >
                 <Airplay className="h-4 w-4 shrink-0" />
                 <span className="truncate">Devices</span>
@@ -490,7 +546,7 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
               <button
                 type="button"
                 onClick={() => setDrawerMode('queue')}
-                className="liquid-glass flex h-11 items-center justify-center gap-2 rounded-full px-3 text-xs sm:text-sm font-medium text-white/90 hover:bg-white/14 active:scale-95 transition-all"
+                className="liquid-glass flex h-11 items-center justify-center gap-1.5 rounded-full px-3 text-xs sm:text-sm font-medium text-white/90 hover:bg-white/14 active:scale-95 transition-all"
               >
                 <ListMusic className="h-4 w-4 shrink-0" />
                 <span className="truncate">Queue</span>
@@ -516,7 +572,7 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
         onAddTrack={onAddToQueue}
       />
 
-      {/* Glass Sheet Drawer for AirPlay Devices / Track Options */}
+      {/* Glass Sheet Drawer for Devices / Track Options */}
       {(drawerMode === 'devices' || drawerMode === 'options') && (
         <div
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 p-0 sm:p-4 backdrop-blur-md"
@@ -618,6 +674,11 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
                           </div>
                         </button>
                         <div className="flex shrink-0 items-center gap-1.5">
+                          {typeof device.batteryLevel === 'number' && (
+                            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-white/85 tabular-nums">
+                              {device.batteryLevel}%
+                            </span>
+                          )}
                           {selected && <Check className="h-4 w-4 text-white" />}
                           {device.source === 'bluetooth' && (
                             <button
@@ -691,14 +752,6 @@ export const FullScreenPlayer: React.FC<FullScreenPlayerProps> = ({
                 >
                   <ListMusic className="h-4 w-4 text-white/80" />
                   <span>Play Next in Queue</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleShare}
-                  className="flex w-full items-center gap-3 rounded-2xl bg-white/[0.05] px-4 py-3 text-left text-sm font-medium hover:bg-white/12 transition-colors"
-                >
-                  <Share2 className="h-4 w-4 text-white/80" />
-                  <span>{copiedNotice ? 'Copied Track Link' : 'Share Track'}</span>
                 </button>
               </div>
             )}

@@ -1,11 +1,12 @@
 import { Track } from '../types/music';
+import { resolveYouTubeCandidatesForTrack } from './musicApi';
 import {
   cacheTrackOffline,
   getCachedAudioBlobEntry,
   getCachedTrackEntry,
 } from './offlineCache';
 
-export type PlaybackSource = 'offline-blob' | 'youtube' | 'idle';
+export type PlaybackSource = 'offline-blob' | 'audio-url' | 'youtube' | 'idle';
 
 export interface PlayerEngineCallbacks {
   onTimeUpdate?: (currentTime: number, duration: number) => void;
@@ -33,6 +34,7 @@ interface YTPlayerInstance {
   pauseVideo: () => void;
   seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
   setVolume: (volumePercent: number) => void;
+  setPlaybackRate?: (suggestedRate: number) => void;
   getCurrentTime: () => number;
   getDuration: () => number;
   getPlayerState: () => number;
@@ -72,58 +74,9 @@ declare global {
   }
 }
 
-interface YouTubeSearchResponse {
-  items?: Array<{
-    id?: {
-      videoId?: string;
-    };
-  }>;
-}
-
-interface PipedSearchItem {
-  url?: string;
-  id?: string;
-  type?: string;
-  title?: string;
-  uploaderName?: string;
-  duration?: number;
-}
-
-interface InvidiousSearchItem {
-  videoId?: string;
-  type?: string;
-  title?: string;
-  author?: string;
-  lengthSeconds?: number;
-}
-
 const YT_VIDEO_CACHE_KEY = 'klyn_yt_vid_cache_v1';
+const YT_VIDEO_CACHE_ALT_KEY = 'klyn_yt_cache_v1';
 const STREAM_UNAVAILABLE_MESSAGE = 'Stream unavailable for this track — try another';
-
-const PIPED_SEARCH_INSTANCES = [
-  'https://pipedapi.kavin.rocks',
-  'https://pipedapi.leptons.xyz',
-  'https://api.piped.private.coffee',
-];
-
-const INVIDIOUS_SEARCH_INSTANCES = ['https://inv.thepixora.com'];
-
-function getConfiguredYouTubeApiKey(): string | null {
-  const raw = import.meta.env.VITE_YOUTUBE_API_KEY;
-  if (typeof raw !== 'string') return null;
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed === 'MY_YOUTUBE_DATA_API_V3_KEY') return null;
-  return trimmed;
-}
-
-function extractIdFromPipedUrl(url?: string): string | null {
-  if (!url) return null;
-  const vMatch = /[?&]v=([a-zA-Z0-9_-]{11})/.exec(url);
-  if (vMatch) return vMatch[1];
-  const shortMatch = /\/([a-zA-Z0-9_-]{11})$/.exec(url.trim());
-  if (shortMatch) return shortMatch[1];
-  return null;
-}
 
 export function extractYouTubeVideoId(input: string): string | null {
   const trimmed = input.trim();
@@ -207,6 +160,7 @@ export async function fetchYouTubeTrackMeta(videoId: string): Promise<Track | nu
     plays: 0,
     downloaded: false,
     isExternal: true,
+    externalSource: 'youtube',
     lyrics: [],
   };
 }
@@ -217,6 +171,7 @@ export class PlayerEngine {
   private source: PlaybackSource = 'idle';
   private isPlayingState = false;
   private volume = 90;
+  private playbackRate = 1;
   private lastKnownTime = 0;
   private playRequestSeq = 0;
 
@@ -227,10 +182,15 @@ export class PlayerEngine {
   private ytPlayerMountNode: HTMLDivElement | null = null;
   private attachedHostElement: HTMLElement | null = null;
   private pollTimerId: number | null = null;
+  private watchdogTimerId: number | null = null;
+  private watchdogProgressCount = 0;
 
   private offlineAudio: HTMLAudioElement | null = null;
   private offlineObjectUrl: string | null = null;
   private preferredSinkId: string = 'default';
+
+  private audioKeepAliveCtx: AudioContext | null = null;
+  private wakeLockSentinel: { release?: () => Promise<void> } | null = null;
 
   private candidateVideoIds: string[] = [];
   private candidateIndex = 0;
@@ -254,7 +214,7 @@ export class PlayerEngine {
   }
 
   public getCurrentTime(): number {
-    if (this.offlineAudio && this.source === 'offline-blob') {
+    if (this.offlineAudio && (this.source === 'offline-blob' || this.source === 'audio-url')) {
       const t = this.offlineAudio.currentTime;
       if (Number.isFinite(t)) return t;
     }
@@ -269,6 +229,97 @@ export class PlayerEngine {
     return this.lastKnownTime;
   }
 
+  public setPlaybackRate(rate: number): void {
+    const clamped = Math.min(2.0, Math.max(0.75, rate));
+    this.playbackRate = clamped;
+    if (this.offlineAudio) {
+      try {
+        this.offlineAudio.playbackRate = clamped;
+      } catch {
+        // ignore
+      }
+    }
+    if (this.ytPlayer?.setPlaybackRate) {
+      try {
+        this.ytPlayer.setPlaybackRate(clamped);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  public skipBy(deltaSeconds: number): void {
+    this.seekTo(this.getCurrentTime() + deltaSeconds);
+  }
+
+  private activateBackgroundKeepAlive(): void {
+    if (typeof window === 'undefined') return;
+    // 1. Silent AudioContext keep-alive pulse so mobile/background tabs hold audio focus
+    try {
+      const AudioCtx =
+        window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx && !this.audioKeepAliveCtx) {
+        this.audioKeepAliveCtx = new AudioCtx();
+      }
+      if (this.audioKeepAliveCtx?.state === 'suspended') {
+        void this.audioKeepAliveCtx.resume().catch(() => {});
+      }
+    } catch {
+      // ignore unsupported AudioContext
+    }
+
+    // 2. Request Screen Wake Lock if supported
+    try {
+      const nav = navigator as Navigator & {
+        wakeLock?: { request: (type: 'screen') => Promise<{ release?: () => Promise<void> }> };
+      };
+      if (nav.wakeLock?.request && !this.wakeLockSentinel) {
+        void nav.wakeLock
+          .request('screen')
+          .then((sentinel) => {
+            this.wakeLockSentinel = sentinel;
+          })
+          .catch(() => {});
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  private releaseWakeLock(): void {
+    if (!this.wakeLockSentinel) return;
+    try {
+      void this.wakeLockSentinel.release?.().catch(() => {});
+    } catch {
+      // ignore
+    }
+    this.wakeLockSentinel = null;
+  }
+
+  private startStallWatchdog(_track: Track, seq: number): void {
+    this.stopStallWatchdog();
+    if (typeof window === 'undefined') return;
+    const baselineTime = this.lastKnownTime;
+    this.watchdogProgressCount = 0;
+
+    this.watchdogTimerId = window.setTimeout(() => {
+      if (seq !== this.playRequestSeq || !this.isPlayingState) return;
+      if (this.source !== 'youtube') return;
+      const nowTime = this.getCurrentTime();
+      if (Math.abs(nowTime - baselineTime) < 0.25 && this.watchdogProgressCount < 1) {
+        // Attempt candidate rotation on stalled YouTube load
+        this.handleYTError(150);
+      }
+    }, 3500);
+  }
+
+  private stopStallWatchdog(): void {
+    if (this.watchdogTimerId !== null && typeof window !== 'undefined') {
+      window.clearTimeout(this.watchdogTimerId);
+      this.watchdogTimerId = null;
+    }
+  }
+
   private ensureOfflineAudio(): HTMLAudioElement | null {
     if (typeof window === 'undefined' || typeof Audio === 'undefined') return null;
     if (this.offlineAudio) return this.offlineAudio;
@@ -276,9 +327,10 @@ export class PlayerEngine {
     const audio = new Audio();
     audio.preload = 'auto';
     audio.volume = this.volume / 100;
+    audio.playbackRate = this.playbackRate;
 
     audio.addEventListener('timeupdate', () => {
-      if (this.source !== 'offline-blob') return;
+      if (this.source !== 'offline-blob' && this.source !== 'audio-url') return;
       const t = Number.isFinite(audio.currentTime) ? audio.currentTime : this.lastKnownTime;
       const d =
         Number.isFinite(audio.duration) && audio.duration > 0
@@ -289,26 +341,26 @@ export class PlayerEngine {
     });
 
     audio.addEventListener('play', () => {
-      if (this.source !== 'offline-blob') return;
+      if (this.source !== 'offline-blob' && this.source !== 'audio-url') return;
       this.isPlayingState = true;
-      this.callbacks.onStateChange?.(true, 'offline-blob', this.currentTrack);
+      this.callbacks.onStateChange?.(true, this.source, this.currentTrack);
     });
 
     audio.addEventListener('pause', () => {
-      if (this.source !== 'offline-blob' || audio.ended) return;
+      if ((this.source !== 'offline-blob' && this.source !== 'audio-url') || audio.ended) return;
       this.isPlayingState = false;
-      this.callbacks.onStateChange?.(false, 'offline-blob', this.currentTrack);
+      this.callbacks.onStateChange?.(false, this.source, this.currentTrack);
     });
 
     audio.addEventListener('ended', () => {
-      if (this.source !== 'offline-blob') return;
+      if (this.source !== 'offline-blob' && this.source !== 'audio-url') return;
       this.isPlayingState = false;
-      this.callbacks.onStateChange?.(false, 'offline-blob', this.currentTrack);
+      this.callbacks.onStateChange?.(false, this.source, this.currentTrack);
       this.callbacks.onEnded?.();
     });
 
     audio.addEventListener('error', () => {
-      if (this.source !== 'offline-blob') return;
+      if (this.source !== 'offline-blob' && this.source !== 'audio-url') return;
       this.isPlayingState = false;
       this.source = 'idle';
       this.callbacks.onStateChange?.(false, 'idle', this.currentTrack);
@@ -365,21 +417,23 @@ export class PlayerEngine {
 
   private hydrateVideoCache(): void {
     if (typeof window === 'undefined') return;
-    try {
-      const raw = window.localStorage.getItem(YT_VIDEO_CACHE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, string | string[]>;
-      for (const [trackId, value] of Object.entries(parsed)) {
-        const list = Array.isArray(value) ? value : [value];
-        const valid = list
-          .filter((id): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id))
-          .slice(0, 3);
-        if (valid.length > 0) {
-          this.videoIdCache.set(trackId, valid);
+    for (const key of [YT_VIDEO_CACHE_KEY, YT_VIDEO_CACHE_ALT_KEY]) {
+      try {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw) as Record<string, string | string[]>;
+        for (const [trackId, value] of Object.entries(parsed)) {
+          const list = Array.isArray(value) ? value : [value];
+          const valid = list
+            .filter((id): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-]{11}$/.test(id))
+            .slice(0, 3);
+          if (valid.length > 0 && !this.videoIdCache.has(trackId)) {
+            this.videoIdCache.set(trackId, valid);
+          }
         }
+      } catch {
+        // ignore storage errors
       }
-    } catch {
-      // ignore storage errors
     }
   }
 
@@ -393,7 +447,9 @@ export class PlayerEngine {
     if (typeof window === 'undefined') return;
     try {
       const entries = Array.from(this.videoIdCache.entries()).slice(-200);
-      window.localStorage.setItem(YT_VIDEO_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+      const serialized = JSON.stringify(Object.fromEntries(entries));
+      window.localStorage.setItem(YT_VIDEO_CACHE_KEY, serialized);
+      window.localStorage.setItem(YT_VIDEO_CACHE_ALT_KEY, serialized);
     } catch {
       // ignore quota errors
     }
@@ -426,7 +482,6 @@ export class PlayerEngine {
       this.ytRootNode.style.opacity = '1';
       this.attachedHostElement.appendChild(this.ytRootNode);
     } else if (!this.attachedHostElement && !this.ytRootNode.parentElement) {
-      // Safe visible-dimension off-overlay anchor until FullScreenPlayer cover mounts
       this.ytRootNode.style.position = 'fixed';
       this.ytRootNode.style.left = '0px';
       this.ytRootNode.style.top = '0px';
@@ -519,6 +574,7 @@ export class PlayerEngine {
               this.ytPlayer = event.target;
               try {
                 event.target.setVolume(this.volume);
+                event.target.setPlaybackRate?.(this.playbackRate);
               } catch {
                 // ignore
               }
@@ -555,6 +611,10 @@ export class PlayerEngine {
         const safeTime = Number.isFinite(current) ? current : this.lastKnownTime;
         const safeDuration =
           Number.isFinite(duration) && duration > 0 ? duration : this.currentTrack?.duration ?? 0;
+        if (Math.abs(safeTime - this.lastKnownTime) > 0.08) {
+          this.watchdogProgressCount += 1;
+          this.stopStallWatchdog();
+        }
         this.lastKnownTime = safeTime;
         this.callbacks.onTimeUpdate?.(safeTime, safeDuration);
       } catch {
@@ -579,10 +639,12 @@ export class PlayerEngine {
     if (state === PLAYING) {
       this.source = 'youtube';
       this.isPlayingState = true;
+      this.stopStallWatchdog();
       try {
         const t = this.ytPlayer?.getCurrentTime() ?? this.lastKnownTime;
         const d = this.ytPlayer?.getDuration() ?? this.currentTrack?.duration ?? 0;
         this.lastKnownTime = Number.isFinite(t) ? t : 0;
+        this.ytPlayer?.setPlaybackRate?.(this.playbackRate);
         this.callbacks.onTimeUpdate?.(
           this.lastKnownTime,
           Number.isFinite(d) && d > 0 ? d : this.currentTrack?.duration ?? 0,
@@ -595,17 +657,19 @@ export class PlayerEngine {
     } else if (state === PAUSED) {
       this.isPlayingState = false;
       this.stopTimePolling();
+      this.stopStallWatchdog();
       this.callbacks.onStateChange?.(false, 'youtube', this.currentTrack);
     } else if (state === ENDED) {
       this.isPlayingState = false;
       this.stopTimePolling();
+      this.stopStallWatchdog();
       this.callbacks.onStateChange?.(false, 'youtube', this.currentTrack);
       this.callbacks.onEnded?.();
     }
   }
 
   private handleYTError(errorCode: number): void {
-    // Rotate candidate videoId on embed restriction / error (e.g. 101, 150, 100)
+    this.stopStallWatchdog();
     const nextIdx = this.candidateIndex + 1;
     if (
       (errorCode === 101 || errorCode === 150 || errorCode === 100 || nextIdx < this.candidateVideoIds.length) &&
@@ -615,7 +679,6 @@ export class PlayerEngine {
     ) {
       this.candidateIndex = nextIdx;
       const fallbackId = this.candidateVideoIds[nextIdx];
-      // Prioritize working candidate first in klyn_yt_vid_cache_v1 while preserving alternatives
       const reordered = [
         fallbackId,
         ...this.candidateVideoIds.filter((id) => id !== fallbackId),
@@ -625,7 +688,7 @@ export class PlayerEngine {
         this.ytPlayer.loadVideoById({ videoId: fallbackId, startSeconds: this.lastKnownTime });
         return;
       } catch {
-        // fall through to error notification
+        // fall through to preview or error notification
       }
     }
 
@@ -646,7 +709,6 @@ export class PlayerEngine {
       }
     };
 
-    // 1. Check direct youtubeId & klyn_yt_vid_cache_v1 first (zero YouTube Data API quota usage on cache hit)
     pushCandidate(track.youtubeId);
     const cachedList = this.videoIdCache.get(track.id);
     if (cachedList && cachedList.length > 0) {
@@ -659,91 +721,8 @@ export class PlayerEngine {
       return candidates;
     }
 
-    const query = `${track.title} ${track.artist} official audio`.trim();
-
-    // 2. Primary Resolver: Official YouTube Data API v3 (CORS-enabled, embeddable music videos)
-    const ytApiKey = getConfiguredYouTubeApiKey();
-    if (ytApiKey) {
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 5000);
-      try {
-        const apiUrl =
-          `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&videoEmbeddable=true&maxResults=3` +
-          `&q=${encodeURIComponent(query)}&key=${encodeURIComponent(ytApiKey)}`;
-        const res = await fetch(apiUrl, { signal: controller.signal });
-        if (res.ok) {
-          const data = (await res.json()) as YouTubeSearchResponse;
-          for (const item of data.items ?? []) {
-            pushCandidate(item.id?.videoId);
-          }
-        }
-      } catch {
-        // Fall through cleanly if network/quota fails
-      } finally {
-        window.clearTimeout(timer);
-      }
-    }
-
-    // 3. Fallback public search race only if YouTube Data API key is unconfigured or yielded 0 results
-    if (candidates.length === 0) {
-      const fetchPiped = async (base: string, filter: 'music_songs' | 'videos'): Promise<string[]> => {
-        const controller = new AbortController();
-        const timer = window.setTimeout(() => controller.abort(), 4000);
-        try {
-          const res = await fetch(
-            `${base}/search?q=${encodeURIComponent(query)}&filter=${filter}`,
-            { mode: 'cors', signal: controller.signal },
-          );
-          if (!res.ok) throw new Error(`Piped ${res.status}`);
-          const json = (await res.json()) as { items?: PipedSearchItem[] };
-          const ids = (json.items ?? [])
-            .filter((item) => !item.type || item.type === 'stream')
-            .map((item) => item.id || extractIdFromPipedUrl(item.url))
-            .filter((id): id is string => Boolean(id && /^[a-zA-Z0-9_-]{11}$/.test(id)));
-          if (ids.length === 0) throw new Error('No videoIds');
-          return ids.slice(0, 3);
-        } finally {
-          window.clearTimeout(timer);
-        }
-      };
-
-      const fetchInvidious = async (base: string): Promise<string[]> => {
-        const controller = new AbortController();
-        const timer = window.setTimeout(() => controller.abort(), 4000);
-        try {
-          const res = await fetch(
-            `${base}/api/v1/search?q=${encodeURIComponent(query)}&type=video`,
-            { mode: 'cors', signal: controller.signal },
-          );
-          if (!res.ok) throw new Error(`Invidious ${res.status}`);
-          const json = (await res.json()) as InvidiousSearchItem[];
-          const ids = (json ?? [])
-            .map((item) => item.videoId)
-            .filter((id): id is string => Boolean(id && /^[a-zA-Z0-9_-]{11}$/.test(id)));
-          if (ids.length === 0) throw new Error('No Invidious videoIds');
-          return ids.slice(0, 3);
-        } finally {
-          window.clearTimeout(timer);
-        }
-      };
-
-      try {
-        const winnerIds = await Promise.any([
-          ...PIPED_SEARCH_INSTANCES.map((inst) => fetchPiped(inst, 'music_songs')),
-          ...INVIDIOUS_SEARCH_INSTANCES.map((inst) => fetchInvidious(inst)),
-        ]);
-        winnerIds.forEach(pushCandidate);
-      } catch {
-        try {
-          const videoWinnerIds = await Promise.any(
-            PIPED_SEARCH_INSTANCES.map((inst) => fetchPiped(inst, 'videos')),
-          );
-          videoWinnerIds.forEach(pushCandidate);
-        } catch {
-          // All fallback resolvers failed or timed out
-        }
-      }
-    }
+    const resolved = await resolveYouTubeCandidatesForTrack(track);
+    resolved.forEach(pushCandidate);
 
     if (candidates.length > 0) {
       this.saveVideoToCache(track.id, candidates);
@@ -751,11 +730,19 @@ export class PlayerEngine {
     return candidates.slice(0, 3);
   }
 
+  public prewarmTrack(track: Track | null): void {
+    if (!track || track.isPodcastEpisode || track.isAudiobookChapter) return;
+    if (this.videoIdCache.has(track.id) || track.youtubeId) return;
+    void this.resolveYouTubeVideoIds(track).catch(() => {});
+  }
+
   public async playTrack(track: Track, startAtTime = 0): Promise<void> {
     const seq = ++this.playRequestSeq;
     this.currentTrack = track;
     this.lastKnownTime = Math.max(0, startAtTime);
     this.stopTimePolling();
+    this.stopStallWatchdog();
+    this.activateBackgroundKeepAlive();
 
     // 1. Check IndexedDB offline cache first (audio_blobs + cached track metadata)
     const [cachedBlobEntry, cachedTrackEntry] = await Promise.all([
@@ -792,6 +779,7 @@ export class PlayerEngine {
           this.source = 'offline-blob';
           audio.src = objectUrl;
           audio.volume = this.volume / 100;
+          audio.playbackRate = this.playbackRate;
           if (startAtTime > 0) {
             audio.currentTime = startAtTime;
           }
@@ -806,8 +794,40 @@ export class PlayerEngine {
       }
     }
 
-    // 2. Stream via masked YouTube IFrame API (using cached youtubeId when available)
+    // 1b. Direct audio stream for Podcasts / Audiobooks when no blob is cached
+    if ((resolvedTrack.isPodcastEpisode || resolvedTrack.isAudiobookChapter) && resolvedTrack.audioStreamUrl) {
+      if (this.ytPlayer) {
+        try {
+          this.ytPlayer.pauseVideo();
+        } catch {
+          // ignore
+        }
+      }
+      this.teardownOfflinePlayback();
+      const audio = this.ensureOfflineAudio();
+      if (audio) {
+        try {
+          this.source = 'audio-url';
+          audio.src = resolvedTrack.audioStreamUrl;
+          audio.volume = this.volume / 100;
+          audio.playbackRate = this.playbackRate;
+          if (startAtTime > 0) {
+            audio.currentTime = startAtTime;
+          }
+          await audio.play();
+          if (seq !== this.playRequestSeq) return;
+          this.isPlayingState = true;
+          this.callbacks.onStateChange?.(true, 'audio-url', resolvedTrack);
+          return;
+        } catch {
+          this.teardownOfflinePlayback();
+        }
+      }
+    }
+
+    // 2. Full-length playback strictly via YouTube Audio IFrame Engine (no 30s previews outside Reels)
     this.teardownOfflinePlayback();
+
     const [player, videoIds] = await Promise.all([
       this.ensureYTPlayer(),
       this.resolveYouTubeVideoIds(resolvedTrack),
@@ -825,9 +845,7 @@ export class PlayerEngine {
 
     this.candidateVideoIds = videoIds;
     this.candidateIndex = 0;
-    this.source = 'youtube';
 
-    // Persist track metadata & resolved YouTube reference cleanly in IndexedDB cache
     void cacheTrackOffline(
       { ...resolvedTrack, youtubeId: resolvedTrack.youtubeId || videoIds[0] },
       { audioUrl: `https://www.youtube.com/watch?v=${videoIds[0]}` },
@@ -835,14 +853,18 @@ export class PlayerEngine {
 
     try {
       player.setVolume(this.volume);
+      player.setPlaybackRate?.(this.playbackRate);
       player.loadVideoById({
         videoId: videoIds[0],
         startSeconds: Math.max(0, startAtTime),
       });
       player.playVideo();
+
+      this.source = 'youtube';
       this.isPlayingState = true;
       this.startTimePolling();
       this.callbacks.onStateChange?.(true, 'youtube', resolvedTrack);
+      this.startStallWatchdog(resolvedTrack, seq);
     } catch {
       this.source = 'idle';
       this.isPlayingState = false;
@@ -862,11 +884,12 @@ export class PlayerEngine {
 
   public async resume(): Promise<boolean> {
     if (!this.currentTrack) return false;
-    if (this.offlineAudio && this.source === 'offline-blob') {
+    this.activateBackgroundKeepAlive();
+    if (this.offlineAudio && (this.source === 'offline-blob' || this.source === 'audio-url')) {
       try {
         await this.offlineAudio.play();
         this.isPlayingState = true;
-        this.callbacks.onStateChange?.(true, 'offline-blob', this.currentTrack);
+        this.callbacks.onStateChange?.(true, this.source, this.currentTrack);
         return true;
       } catch {
         // Fallback to playTrack
@@ -890,7 +913,9 @@ export class PlayerEngine {
   public pause(): void {
     this.isPlayingState = false;
     this.stopTimePolling();
-    if (this.offlineAudio && this.source === 'offline-blob') {
+    this.stopStallWatchdog();
+    this.releaseWakeLock();
+    if (this.offlineAudio && (this.source === 'offline-blob' || this.source === 'audio-url')) {
       try {
         this.offlineAudio.pause();
       } catch {
@@ -910,7 +935,7 @@ export class PlayerEngine {
   public seekTo(seconds: number): void {
     const fallbackDuration = this.currentTrack?.duration ?? 0;
     let liveDuration = fallbackDuration;
-    if (this.offlineAudio && this.source === 'offline-blob') {
+    if (this.offlineAudio && (this.source === 'offline-blob' || this.source === 'audio-url')) {
       if (Number.isFinite(this.offlineAudio.duration) && this.offlineAudio.duration > 0) {
         liveDuration = this.offlineAudio.duration;
       }
@@ -926,7 +951,7 @@ export class PlayerEngine {
     const clamped = Math.min(maxBounds, Math.max(0, seconds));
     this.lastKnownTime = clamped;
 
-    if (this.offlineAudio && this.source === 'offline-blob') {
+    if (this.offlineAudio && (this.source === 'offline-blob' || this.source === 'audio-url')) {
       try {
         this.offlineAudio.currentTime = clamped;
       } catch {
@@ -960,6 +985,8 @@ export class PlayerEngine {
 
   public destroy(): void {
     this.stopTimePolling();
+    this.stopStallWatchdog();
+    this.releaseWakeLock();
     this.teardownOfflinePlayback();
     this.offlineAudio = null;
     if (this.ytPlayer) {

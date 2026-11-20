@@ -1,14 +1,14 @@
 import { AudioDevice } from '../types/music';
 
 export const SEARCH_GENRES = [
-  { id: 'g-elec', name: 'Electronic', color: '#8A5224' },
-  { id: 'g-rnb', name: 'Alt-R&B', color: '#7D2332' },
-  { id: 'g-lofi', name: 'Lo-Fi', color: '#1E527D' },
-  { id: 'g-ambient', name: 'Ambient', color: '#2F5E48' },
-  { id: 'g-indie', name: 'Indie', color: '#394F57' },
-  { id: 'g-soul', name: 'Neo-Soul', color: '#611D2D' },
-  { id: 'g-house', name: 'House', color: '#265370' },
-  { id: 'g-classical', name: 'Classical', color: '#6E532E' },
+  { id: 'g-trap', name: 'Trap', color: '#7D2332' },
+  { id: 'g-rnb', name: 'R&B', color: '#8A5224' },
+  { id: 'g-hiphop', name: 'Hip-Hop', color: '#611D2D' },
+  { id: 'g-pop', name: 'Pop', color: '#1E527D' },
+  { id: 'g-afro', name: 'Afrobeats', color: '#2F5E48' },
+  { id: 'g-amapiano', name: 'Amapiano', color: '#6E532E' },
+  { id: 'g-elec', name: 'Electronic', color: '#265370' },
+  { id: 'g-alt', name: 'Alternative', color: '#394F57' },
 ];
 
 export const DEFAULT_OUTPUT_DEVICE: AudioDevice = {

@@ -1,6 +1,19 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { ChevronDown, ExternalLink, Pause, Play, Quote, SkipBack, SkipForward } from 'lucide-react';
-import { Track } from '../types/music';
+import {
+  Airplay,
+  ChevronDown,
+  ExternalLink,
+  Pause,
+  Play,
+  Quote,
+  Repeat,
+  Repeat1,
+  Shuffle,
+  SkipBack,
+  SkipForward,
+  Sparkles,
+} from 'lucide-react';
+import { RepeatMode, ShuffleMode, Track } from '../types/music';
 import { CoverArt } from './CoverArt';
 import { ExpandingScrubber } from './ExpandingScrubber';
 
@@ -9,10 +22,16 @@ interface FullLyricsViewProps {
   isPlaying: boolean;
   currentTime: number;
   autoScrollLyrics: boolean;
+  shuffleMode?: ShuffleMode;
+  repeatMode?: RepeatMode;
+  activeDeviceName?: string;
   onSeek: (time: number) => void;
   onTogglePlay: () => void;
   onPrevTrack: () => void;
   onNextTrack: () => void;
+  onCycleShuffle?: () => void;
+  onCycleRepeat?: () => void;
+  onOpenDevices?: () => void;
   onExitLyrics: () => void;
   onCollapsePlayer: () => void;
 }
@@ -24,10 +43,16 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
   isPlaying,
   currentTime,
   autoScrollLyrics,
+  shuffleMode = 'off',
+  repeatMode = 'off',
+  activeDeviceName = 'Output',
   onSeek,
   onTogglePlay,
   onPrevTrack,
   onNextTrack,
+  onCycleShuffle,
+  onCycleRepeat,
+  onOpenDevices,
   onExitLyrics,
   onCollapsePlayer,
 }) => {
@@ -96,7 +121,7 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
           <button
             type="button"
             onClick={onExitLyrics}
-            className="flex min-w-0 flex-1 items-center gap-3 text-left rounded-full pr-2 hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+            className="flex min-w-0 flex-1 items-center gap-3 rounded-full pr-2 text-left hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
           >
             <CoverArt
               src={track.coverUrl}
@@ -110,23 +135,21 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
             </div>
           </button>
 
-          <div className="flex shrink-0 items-center gap-1.5">
-            <button
-              type="button"
-              onClick={onCollapsePlayer}
-              aria-label="Collapse player"
-              className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white/85 hover:bg-white/20 hover:text-white transition-colors"
-            >
-              <ChevronDown className="h-4.5 w-4.5" />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onCollapsePlayer}
+            aria-label="Collapse player"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/10 text-white/85 hover:bg-white/20 hover:text-white transition-colors"
+          >
+            <ChevronDown className="h-4.5 w-4.5" />
+          </button>
         </div>
       </div>
 
-      {/* Scrollable Time-Synced Lyrics Canvas */}
+      {/* Scrollable Time-Synced Lyrics Canvas with generous bottom clearance */}
       <div
         ref={scrollContainerRef}
-        className="glass-scroll relative z-10 flex-1 overflow-y-auto px-5 sm:px-10 py-28 sm:py-36"
+        className="glass-scroll relative z-10 flex-1 overflow-y-auto px-5 sm:px-10 pt-16 sm:pt-24 pb-48 sm:pb-52"
       >
         {track.lyricsLoading && track.lyrics.length === 0 ? (
           <div
@@ -210,16 +233,16 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
       {/* Top & Bottom Edge Fade Masks */}
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed inset-x-0 top-16 h-20 bg-gradient-to-b from-black/70 to-transparent z-10"
+        className="pointer-events-none fixed inset-x-0 top-16 h-16 bg-gradient-to-b from-black/70 to-transparent z-10"
       />
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed inset-x-0 bottom-28 h-24 bg-gradient-to-t from-black/80 to-transparent z-10"
+        className="pointer-events-none fixed inset-x-0 bottom-36 h-24 bg-gradient-to-t from-black/85 to-transparent z-10"
       />
 
-      {/* Bottom Floating Controls Pill */}
-      <div className="relative z-20 flex items-center justify-center px-4 pb-5 sm:pb-7">
-        <div className="liquid-glass-elevated w-full max-w-xl rounded-3xl px-4 py-3 sm:px-5 sm:py-3.5">
+      {/* Minimal Floating Liquid Glass Control Capsule */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex items-center justify-center px-3 sm:px-4 pb-[calc(0.85rem+env(safe-area-inset-bottom))] sm:pb-6">
+        <div className="pointer-events-auto liquid-glass-elevated w-full max-w-lg rounded-[28px] px-4 py-3 sm:px-5 sm:py-3.5">
           <ExpandingScrubber
             currentTime={currentTime}
             duration={track.duration}
@@ -228,10 +251,28 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
             showTimestamps
           />
 
-          <div className="mt-2 flex items-center justify-between gap-3">
-            <div className="w-20" />
+          <div className="mt-2 flex items-center justify-between gap-2">
+            {/* Shuffle / Smart Shuffle */}
+            <button
+              type="button"
+              onClick={onCycleShuffle}
+              aria-label={`Shuffle mode: ${shuffleMode}`}
+              aria-pressed={shuffleMode !== 'off'}
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                shuffleMode !== 'off'
+                  ? 'bg-white/16 text-white'
+                  : 'text-white/55 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              {shuffleMode === 'smart' ? (
+                <Sparkles className="h-4 w-4" />
+              ) : (
+                <Shuffle className="h-4 w-4" />
+              )}
+            </button>
 
-            <div className="flex items-center gap-3 sm:gap-5">
+            {/* Primary Transport */}
+            <div className="flex items-center gap-3.5 sm:gap-5">
               <button
                 type="button"
                 onClick={onPrevTrack}
@@ -244,7 +285,7 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
                 type="button"
                 onClick={onTogglePlay}
                 aria-label={isPlaying ? 'Pause' : 'Play'}
-                className="flex h-11 w-11 items-center justify-center rounded-full bg-white text-black shadow-lg active:scale-90 transition-transform"
+                className="flex h-12 w-12 sm:h-13 sm:w-13 items-center justify-center rounded-full bg-white text-black shadow-2xl hover:scale-[1.03] active:scale-90 transition-transform"
               >
                 {isPlaying ? (
                   <Pause className="h-5 w-5 fill-current" />
@@ -262,14 +303,43 @@ export const FullLyricsView: React.FC<FullLyricsViewProps> = ({
               </button>
             </div>
 
+            {/* Repeat */}
+            <button
+              type="button"
+              onClick={onCycleRepeat}
+              aria-label={`Repeat mode: ${repeatMode}`}
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                repeatMode !== 'off'
+                  ? 'bg-white/16 text-white'
+                  : 'text-white/55 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              {repeatMode === 'one' ? (
+                <Repeat1 className="h-4 w-4" />
+              ) : (
+                <Repeat className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+
+          <div className="mt-2 flex items-center justify-between gap-2 pt-2 border-t border-white/[0.08]">
+            <button
+              type="button"
+              onClick={onOpenDevices}
+              className="flex min-w-0 max-w-[58%] items-center gap-1.5 rounded-full bg-white/[0.08] border border-white/12 px-3 py-1.5 text-[11px] font-medium text-white/85 hover:bg-white/15 transition-colors"
+            >
+              <Airplay className="h-3.5 w-3.5 shrink-0 text-white/75" />
+              <span className="truncate">{activeDeviceName}</span>
+            </button>
+
             <button
               type="button"
               onClick={onExitLyrics}
-              aria-label="Lyrics active — click to exit lyrics"
-              className="flex h-9 w-20 items-center justify-center gap-1.5 rounded-full bg-white text-black text-xs font-semibold shadow-sm active:scale-95 transition-transform"
+              aria-label="Exit lyrics"
+              className="flex items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-[11px] font-semibold text-black shadow-sm active:scale-95 transition-transform"
             >
-              <Quote className="h-3.5 w-3.5 fill-current" />
-              <span>Lyrics</span>
+              <Quote className="h-3 w-3 fill-current" />
+              <span>Close Lyrics</span>
             </button>
           </div>
         </div>

@@ -2,50 +2,102 @@ import {
   LikedSongsCustomization,
   ListeningStatsState,
   PlaylistItem,
+  ShowProgressEntry,
   SocialUser,
   Track,
   UserAccount,
   UserPreferences,
 } from '../types/music';
 
-const APP_STATE_KEY = 'klyn_app_state_v1';
-const SAVED_PROFILES_KEY = 'klyn_saved_accounts_v1';
+const APP_STATE_PREFIX = 'klyn_v4_';
+const SAVED_PROFILES_KEY = 'klyn_saved_accounts_v4';
+const DEVICE_IDENTITY_KEY = 'klyn_device_identity_v1';
 
-const LEGACY_MOCK_TRACK_IDS = new Set([
-  'obsidian-echoes',
-  'velvet-horizon',
-  'rain-on-shibuya',
-  'solar-caustics',
-  'nordic-static',
-  'crimson-nocturne',
-  'afterhours-dub',
-  'monolith-spatial',
-]);
+let activeScopeUid: string | null = null;
 
-const LEGACY_MOCK_PLAYLIST_IDS = new Set([
-  'pl-midnight',
-  'pl-drive',
-  'pl-focus',
-  'pl-silk',
-]);
+function sanitizeScope(uid: string | null): string {
+  const clean = (uid ?? '').trim().replace(/[^a-zA-Z0-9._-]/g, '_');
+  return clean || 'guest';
+}
 
-const LEGACY_MOCK_ARTISTS = new Set([
-  'Kaelen Vance',
-  'Sora & The Nocturnes',
-  'Sora & The Waves',
-  'Ren Takahashi',
-  'Elara & Mylo',
-  'Hafdis Lind',
-  'Valerie Noir',
-]);
+function getScopedStateKey(uid: string | null = activeScopeUid): string {
+  return `${APP_STATE_PREFIX}${sanitizeScope(uid)}_state`;
+}
 
-const LEGACY_MOCK_SOCIAL_IDS = new Set([
-  'user-aria',
-  'user-julian',
-  'user-nina',
-  'user-kenji',
-  'user-claire',
-]);
+export function setActiveStorageUserScope(uid: string | null): void {
+  activeScopeUid = uid && uid.trim() ? uid.trim() : null;
+}
+
+export function getActiveStorageUserScope(): string | null {
+  return activeScopeUid;
+}
+
+export interface LocalDeviceIdentity {
+  deviceId: string;
+  name: string;
+  platform: string;
+}
+
+export function getOrCreateLocalDeviceIdentity(): LocalDeviceIdentity {
+  const fallbackName = (() => {
+    if (typeof navigator === 'undefined') return 'Web Browser';
+    const ua = navigator.userAgent || '';
+    const browser = ua.includes('Edg/')
+      ? 'Edge'
+      : ua.includes('Chrome/') && !ua.includes('Edg/')
+        ? 'Chrome'
+        : ua.includes('Firefox/')
+          ? 'Firefox'
+          : ua.includes('Safari/') && !ua.includes('Chrome/')
+            ? 'Safari'
+            : 'Browser';
+    const os = /iPhone|iPad|iPod/i.test(ua)
+      ? 'iOS'
+      : /Android/i.test(ua)
+        ? 'Android'
+        : /Mac OS X|Macintosh/i.test(ua)
+          ? 'macOS'
+          : /Windows/i.test(ua)
+            ? 'Windows'
+            : /Linux/i.test(ua)
+              ? 'Linux'
+              : 'Web';
+    return `${browser} on ${os}`;
+  })();
+
+  const platform =
+    typeof navigator !== 'undefined'
+      ? /iPhone|iPad|iPod/i.test(navigator.userAgent)
+        ? 'iOS'
+        : /Android/i.test(navigator.userAgent)
+          ? 'Android'
+          : 'Desktop'
+      : 'Web';
+
+  if (typeof window === 'undefined') {
+    return { deviceId: 'web-session', name: fallbackName, platform };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(DEVICE_IDENTITY_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<LocalDeviceIdentity>;
+      if (parsed.deviceId && parsed.name) {
+        return {
+          deviceId: parsed.deviceId,
+          name: parsed.name,
+          platform: parsed.platform || platform,
+        };
+      }
+    }
+    const deviceId = `klyn_dev_${Math.random().toString(36).slice(2, 10)}_${Date.now().toString(36)}`;
+    const identity: LocalDeviceIdentity = { deviceId, name: fallbackName, platform };
+    window.localStorage.setItem(DEVICE_IDENTITY_KEY, JSON.stringify(identity));
+    return identity;
+  } catch {
+    return { deviceId: 'web-session', name: fallbackName, platform };
+  }
+}
 
 export interface CentralizedAppState {
   user: UserAccount | null;
@@ -62,6 +114,8 @@ export interface CentralizedAppState {
   activeDeviceId: string;
   socialUsers: SocialUser[];
   discoveredTracks: Track[];
+  recentSearches?: string[];
+  showProgress?: Record<string, ShowProgressEntry>;
 }
 
 export const EMPTY_LISTENING_STATS: ListeningStatsState = {
@@ -86,6 +140,17 @@ export const DEFAULT_LIKED_SONGS_CUSTOMIZATION: LikedSongsCustomization = {
   showQualityBadges: true,
 };
 
+const LEGACY_MOCK_TRACK_IDS = new Set([
+  'obsidian-echoes',
+  'velvet-horizon',
+  'rain-on-shibuya',
+  'solar-caustics',
+  'nordic-static',
+  'crimson-nocturne',
+  'afterhours-dub',
+  'monolith-spatial',
+]);
+
 function isLegacyFakeCover(url?: string): boolean {
   return Boolean(url && url.includes('/src/assets/images/cover_'));
 }
@@ -105,66 +170,11 @@ function sanitizeLoadedState(raw: CentralizedAppState): CentralizedAppState {
       : null;
 
   const realLikedIds = (raw.likedTrackIds ?? []).filter((id) => !LEGACY_MOCK_TRACK_IDS.has(id));
-  const realPlaylists = (raw.playlists ?? [])
-    .filter((pl) => !LEGACY_MOCK_PLAYLIST_IDS.has(pl.id))
-    .map((pl) => ({
-      ...pl,
-      trackIds: pl.trackIds.filter((id) => !LEGACY_MOCK_TRACK_IDS.has(id)),
-      coverUrl: isLegacyFakeCover(pl.coverUrl) ? '' : pl.coverUrl,
-    }));
-
-  const realFollowed = (raw.followedArtistIds ?? []).filter(
-    (name) => !LEGACY_MOCK_ARTISTS.has(name),
-  );
-
-  const realSocialUsers = (raw.socialUsers ?? []).filter(
-    (u) => !LEGACY_MOCK_SOCIAL_IDS.has(u.id),
-  );
-
-  const rawStats = raw.listeningStats;
-  const cleanTrackCounts: Record<string, number> = {};
-  Object.entries(rawStats?.trackPlayCounts ?? {}).forEach(([id, count]) => {
-    if (!LEGACY_MOCK_TRACK_IDS.has(id) && typeof count === 'number' && count > 0) {
-      cleanTrackCounts[id] = count;
-    }
-  });
-
-  const cleanArtistCounts: Record<string, number> = {};
-  Object.entries(rawStats?.artistPlayCounts ?? {}).forEach(([artist, count]) => {
-    if (!LEGACY_MOCK_ARTISTS.has(artist) && typeof count === 'number' && count > 0) {
-      cleanArtistCounts[artist] = count;
-    }
-  });
-
-  const cleanRecentLog = (rawStats?.recentLog ?? []).filter(
-    (entry) => entry && !LEGACY_MOCK_TRACK_IDS.has(entry.trackId),
-  );
-
-  const cleanPlayEvents = (rawStats?.playEvents ?? []).filter(
-    (ev) => ev && !LEGACY_MOCK_TRACK_IDS.has(ev.trackId) && !LEGACY_MOCK_ARTISTS.has(ev.artist),
-  );
-
-  const hasAnyRealActivity =
-    cleanRecentLog.length > 0 ||
-    Object.keys(cleanTrackCounts).length > 0 ||
-    (rawStats?.activeDates?.length ?? 0) > 0;
-
-  const sanitizedStats: ListeningStatsState = hasAnyRealActivity
-    ? {
-        dailyMinutes:
-          Array.isArray(rawStats?.dailyMinutes) && rawStats.dailyMinutes.length === 7
-            ? rawStats.dailyMinutes
-            : [0, 0, 0, 0, 0, 0, 0],
-        dailyMinutesByDate: rawStats?.dailyMinutesByDate ?? {},
-        activeDates: Array.isArray(rawStats?.activeDates) ? rawStats.activeDates : [],
-        playEvents: cleanPlayEvents,
-        artistPlayCounts: cleanArtistCounts,
-        trackPlayCounts: cleanTrackCounts,
-        recentTrackIds: cleanRecentLog.map((e) => e.trackId),
-        recentLog: cleanRecentLog,
-        streakDays: typeof rawStats?.streakDays === 'number' ? rawStats.streakDays : 0,
-      }
-    : { ...EMPTY_LISTENING_STATS };
+  const realPlaylists = (raw.playlists ?? []).map((pl) => ({
+    ...pl,
+    trackIds: (pl.trackIds ?? []).filter((id) => !LEGACY_MOCK_TRACK_IDS.has(id)),
+    coverUrl: isLegacyFakeCover(pl.coverUrl) ? '' : pl.coverUrl,
+  }));
 
   return {
     ...raw,
@@ -174,19 +184,22 @@ function sanitizeLoadedState(raw: CentralizedAppState): CentralizedAppState {
         : raw.activeDeviceId,
     likedTrackIds: realLikedIds,
     playlists: realPlaylists,
-    followedArtistIds: realFollowed,
+    followedArtistIds: raw.followedArtistIds ?? [],
     queue: realQueue,
     discoveredTracks: realDiscovered,
     currentTrack: realCurrentTrack,
     currentTime: realCurrentTrack ? raw.currentTime ?? 0 : 0,
-    listeningStats: sanitizedStats,
-    socialUsers: realSocialUsers,
+    listeningStats: raw.listeningStats ?? { ...EMPTY_LISTENING_STATS },
+    socialUsers: raw.socialUsers ?? [],
+    recentSearches: Array.isArray(raw.recentSearches) ? raw.recentSearches.slice(0, 30) : [],
+    showProgress: raw.showProgress ?? {},
   };
 }
 
-export function loadCentralizedAppState(): CentralizedAppState | null {
+export function loadCentralizedAppState(uid: string | null = activeScopeUid): CentralizedAppState | null {
+  if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(APP_STATE_KEY);
+    const raw = window.localStorage.getItem(getScopedStateKey(uid));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CentralizedAppState;
     if (!parsed || typeof parsed !== 'object') return null;
@@ -196,9 +209,14 @@ export function loadCentralizedAppState(): CentralizedAppState | null {
   }
 }
 
-export function saveCentralizedAppState(state: CentralizedAppState): void {
+export function saveCentralizedAppState(
+  state: CentralizedAppState,
+  uid: string | null = state.user?.uid ?? activeScopeUid,
+): void {
+  if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(APP_STATE_KEY, JSON.stringify(state));
+    const key = getScopedStateKey(uid);
+    window.localStorage.setItem(key, JSON.stringify(state));
     if (state.user) {
       const saved = loadSavedAccounts().filter(
         (a) => a.email.toLowerCase() !== state.user!.email.toLowerCase(),
@@ -214,13 +232,37 @@ export function saveCentralizedAppState(state: CentralizedAppState): void {
 }
 
 export function clearActiveUserSession(): void {
+  if (typeof window === 'undefined') return;
   try {
-    const existing = loadCentralizedAppState();
+    const key = getScopedStateKey(activeScopeUid);
+    const existing = loadCentralizedAppState(activeScopeUid);
     if (existing) {
       window.localStorage.setItem(
-        APP_STATE_KEY,
+        key,
         JSON.stringify({ ...existing, user: null, isPlaying: false }),
       );
+    }
+    const guestKey = getScopedStateKey(null);
+    window.localStorage.removeItem(guestKey);
+    activeScopeUid = null;
+  } catch {
+    activeScopeUid = null;
+  }
+}
+
+export function clearCurrentUserRuntimeCaches(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const scopedPrefix = `${APP_STATE_PREFIX}${sanitizeScope(activeScopeUid)}_`;
+    const toRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const k = window.localStorage.key(i);
+      if (k && (k.startsWith(scopedPrefix) || k.startsWith('klyn_user_cache_'))) {
+        toRemove.push(k);
+      }
+    }
+    for (const k of toRemove) {
+      window.localStorage.removeItem(k);
     }
   } catch {
     // ignore
@@ -228,6 +270,7 @@ export function clearActiveUserSession(): void {
 }
 
 export function loadSavedAccounts(): UserAccount[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(SAVED_PROFILES_KEY);
     if (!raw) return [];

@@ -1,6 +1,11 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Default deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
     // ===============================================================
     // Helper Functions
     // ===============================================================
@@ -45,9 +50,9 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'name', 'handle', 'email', 'initials', 'avatarUrl', 'avatarStyle',
           'accentColor', 'favoriteGenres', 'likedTrackIds', 'followedArtistIds',
-          'downloadedTrackIds', 'activeDeviceId', 'hasCompletedOnboarding',
-          'preferences', 'likedSongsCustomization', 'listeningStats',
-          'createdAt', 'updatedAt'
+          'downloadedTrackIds', 'recentSearches', 'activeDeviceId', 'hasCompletedOnboarding',
+          'notificationsEnabled', 'connectedApps', 'preferences', 'likedSongsCustomization',
+          'listeningStats', 'showProgress', 'createdAt', 'updatedAt'
         ])
         && data.uid == userId
         && isNonEmptyStr(data.name, 100)
@@ -57,15 +62,19 @@ service cloud.firestore {
         && (!('avatarUrl' in data) || isOptionalStr(data.avatarUrl, 120000))
         && (!('avatarStyle' in data) || isValidAvatarStyle(data.avatarStyle))
         && (!('accentColor' in data) || isNonEmptyStr(data.accentColor, 32))
-        && (!('favoriteGenres' in data) || (data.favoriteGenres is list && data.favoriteGenres.size() <= 12))
+        && (!('favoriteGenres' in data) || (data.favoriteGenres is list && data.favoriteGenres.size() <= 16))
         && (!('likedTrackIds' in data) || (data.likedTrackIds is list && data.likedTrackIds.size() <= 500))
         && (!('followedArtistIds' in data) || (data.followedArtistIds is list && data.followedArtistIds.size() <= 200))
         && (!('downloadedTrackIds' in data) || (data.downloadedTrackIds is list && data.downloadedTrackIds.size() <= 500))
-        && (!('activeDeviceId' in data) || isOptionalStr(data.activeDeviceId, 64))
+        && (!('recentSearches' in data) || (data.recentSearches is list && data.recentSearches.size() <= 40))
+        && (!('activeDeviceId' in data) || isOptionalStr(data.activeDeviceId, 128))
         && data.hasCompletedOnboarding is bool
-        && (!('preferences' in data) || (data.preferences is map && data.preferences.keys().size() <= 30))
+        && (!('notificationsEnabled' in data) || data.notificationsEnabled is bool)
+        && (!('connectedApps' in data) || (data.connectedApps is map && data.connectedApps.keys().size() <= 8))
+        && (!('preferences' in data) || (data.preferences is map && data.preferences.keys().size() <= 35))
         && (!('likedSongsCustomization' in data) || (data.likedSongsCustomization is map && data.likedSongsCustomization.keys().size() <= 12))
-        && (!('listeningStats' in data) || (data.listeningStats is map && data.listeningStats.keys().size() <= 16));
+        && (!('listeningStats' in data) || (data.listeningStats is map && data.listeningStats.keys().size() <= 16))
+        && (!('showProgress' in data) || (data.showProgress is map && data.showProgress.keys().size() <= 100));
     }
 
     function isValidUserPlaylist(data, userId, playlistId) {
@@ -73,7 +82,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'ownerId', 'title', 'curator', 'description', 'trackIds', 'coverUrl',
           'pinned', 'downloaded', 'accentGradient', 'displayMode', 'showQualityBadges',
-          'isAiBlend', 'blendMatchPct', 'sharedWithFriendId', 'createdAt', 'updatedAt'
+          'isAiBlend', 'blendMatchPct', 'sharedWithFriendId', 'sourceProvider', 'createdAt', 'updatedAt'
         ])
         && data.id == playlistId
         && data.ownerId == userId
@@ -89,7 +98,8 @@ service cloud.firestore {
         && (!('showQualityBadges' in data) || data.showQualityBadges is bool)
         && (!('isAiBlend' in data) || data.isAiBlend is bool)
         && (!('blendMatchPct' in data) || (data.blendMatchPct is number && data.blendMatchPct >= 0 && data.blendMatchPct <= 100))
-        && (!('sharedWithFriendId' in data) || isOptionalStr(data.sharedWithFriendId, 128));
+        && (!('sharedWithFriendId' in data) || isOptionalStr(data.sharedWithFriendId, 128))
+        && (!('sourceProvider' in data) || isOptionalStr(data.sourceProvider, 32));
     }
 
     function isValidDownloadedTrack(data, userId, trackId) {
@@ -117,6 +127,30 @@ service cloud.firestore {
         && (!('youtubeId' in data) || isOptionalStr(data.youtubeId, 32));
     }
 
+    function isValidUserDevice(data, userId, deviceId) {
+      return data.keys().hasAll(['deviceId', 'ownerId', 'name', 'isPlaying', 'lastSeen', 'updatedAt'])
+        && data.keys().hasOnly([
+          'deviceId', 'ownerId', 'name', 'platform', 'isPlaying',
+          'activeTrackId', 'activeTrackTitle', 'activeTrackArtist', 'playbackPosition',
+          'batteryLevel', 'batteryCharging', 'bluetoothDeviceName', 'bluetoothBatteryLevel',
+          'lastSeen', 'updatedAt'
+        ])
+        && data.deviceId == deviceId
+        && data.ownerId == userId
+        && isNonEmptyStr(data.name, 120)
+        && (!('platform' in data) || isOptionalStr(data.platform, 80))
+        && data.isPlaying is bool
+        && (!('activeTrackId' in data) || isOptionalStr(data.activeTrackId, 128))
+        && (!('activeTrackTitle' in data) || isOptionalStr(data.activeTrackTitle, 200))
+        && (!('activeTrackArtist' in data) || isOptionalStr(data.activeTrackArtist, 150))
+        && (!('playbackPosition' in data) || (data.playbackPosition is number && data.playbackPosition >= 0 && data.playbackPosition <= 86400))
+        && (!('batteryLevel' in data) || data.batteryLevel == null || (data.batteryLevel is number && data.batteryLevel >= 0 && data.batteryLevel <= 100))
+        && (!('batteryCharging' in data) || data.batteryCharging == null || data.batteryCharging is bool)
+        && (!('bluetoothDeviceName' in data) || isOptionalStr(data.bluetoothDeviceName, 120))
+        && (!('bluetoothBatteryLevel' in data) || data.bluetoothBatteryLevel == null || (data.bluetoothBatteryLevel is number && data.bluetoothBatteryLevel >= 0 && data.bluetoothBatteryLevel <= 100))
+        && data.lastSeen is number && data.lastSeen >= 0;
+    }
+
     function isValidUserFriend(data, userId, friendId) {
       return data.keys().hasAll(['id', 'ownerId', 'name', 'handle', 'initials', 'isFriend', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
@@ -136,6 +170,53 @@ service cloud.firestore {
         && (!('lastActiveLabel' in data) || isOptionalStr(data.lastActiveLabel, 80));
     }
 
+    function isValidPublicProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'name', 'handle', 'initials', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'name', 'handle', 'initials', 'avatarUrl', 'accentColor', 'updatedAt'
+        ])
+        && data.uid == userId
+        && isNonEmptyStr(data.name, 100)
+        && isNonEmptyStr(data.handle, 64)
+        && isNonEmptyStr(data.initials, 4)
+        && (!('avatarUrl' in data) || isOptionalStr(data.avatarUrl, 120000))
+        && (!('accentColor' in data) || isOptionalStr(data.accentColor, 32));
+    }
+
+    function isValidFriendRequest(data, requestId) {
+      return data.keys().hasAll(['id', 'fromUid', 'fromName', 'fromHandle', 'toUid', 'kind', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'fromUid', 'fromName', 'fromHandle', 'toUid', 'kind', 'status', 'trackId', 'createdAt', 'updatedAt'
+        ])
+        && data.id == requestId
+        && isValidId(data.fromUid)
+        && isValidId(data.toUid)
+        && data.fromUid != data.toUid
+        && isNonEmptyStr(data.fromName, 100)
+        && isNonEmptyStr(data.fromHandle, 64)
+        && data.kind in ['friend', 'blend', 'listen-party']
+        && data.status in ['pending', 'accepted', 'declined']
+        && (!('trackId' in data) || isOptionalStr(data.trackId, 128));
+    }
+
+    function isValidListenParty(data, partyId) {
+      return data.keys().hasAll(['id', 'hostUid', 'guestUid', 'status', 'isPlaying', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'hostUid', 'guestUid', 'status', 'activeTrackId', 'activeTrackTitle',
+          'activeTrackArtist', 'isPlaying', 'messages', 'createdAt', 'updatedAt'
+        ])
+        && data.id == partyId
+        && isValidId(data.hostUid)
+        && isValidId(data.guestUid)
+        && data.hostUid != data.guestUid
+        && data.status in ['active', 'ended']
+        && (!('activeTrackId' in data) || isOptionalStr(data.activeTrackId, 128))
+        && (!('activeTrackTitle' in data) || isOptionalStr(data.activeTrackTitle, 200))
+        && (!('activeTrackArtist' in data) || isOptionalStr(data.activeTrackArtist, 150))
+        && data.isPlaying is bool
+        && (!('messages' in data) || (data.messages is list && data.messages.size() <= 30));
+    }
+
     // ===============================================================
     // Listener Profile & Subcollections
     // ===============================================================
@@ -153,8 +234,9 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'name', 'handle', 'email', 'initials', 'avatarUrl', 'avatarStyle',
           'accentColor', 'favoriteGenres', 'likedTrackIds', 'followedArtistIds',
-          'downloadedTrackIds', 'activeDeviceId', 'hasCompletedOnboarding',
-          'preferences', 'likedSongsCustomization', 'listeningStats', 'updatedAt'
+          'downloadedTrackIds', 'recentSearches', 'activeDeviceId', 'hasCompletedOnboarding',
+          'notificationsEnabled', 'connectedApps', 'preferences', 'likedSongsCustomization',
+          'listeningStats', 'showProgress', 'updatedAt'
         ])
         && request.resource.data.uid == resource.data.uid
         && request.resource.data.createdAt == resource.data.createdAt
@@ -162,7 +244,8 @@ service cloud.firestore {
       allow delete: if isValidId(userId) && isOwner(userId);
 
       match /playlists/{playlistId} {
-        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow get: if isValidId(userId) && isValidId(playlistId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
         allow create: if isValidId(userId)
           && isValidId(playlistId)
           && isOwner(userId)
@@ -176,7 +259,7 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'title', 'curator', 'description', 'trackIds', 'coverUrl', 'pinned',
             'downloaded', 'accentGradient', 'displayMode', 'showQualityBadges',
-            'isAiBlend', 'blendMatchPct', 'sharedWithFriendId', 'updatedAt'
+            'isAiBlend', 'blendMatchPct', 'sharedWithFriendId', 'sourceProvider', 'updatedAt'
           ])
           && request.resource.data.id == resource.data.id
           && request.resource.data.ownerId == resource.data.ownerId
@@ -186,7 +269,8 @@ service cloud.firestore {
       }
 
       match /downloads/{trackId} {
-        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow get: if isValidId(userId) && isValidId(trackId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
         allow create: if isValidId(userId)
           && isValidId(trackId)
           && isOwner(userId)
@@ -207,8 +291,32 @@ service cloud.firestore {
         allow delete: if isValidId(userId) && isValidId(trackId) && isOwner(userId);
       }
 
+      match /devices/{deviceId} {
+        allow get: if isValidId(userId) && isValidId(deviceId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId)
+          && isValidId(deviceId)
+          && isOwner(userId)
+          && isValidUserDevice(request.resource.data, userId, deviceId)
+          && request.resource.data.updatedAt == request.time;
+        allow update: if isValidId(userId)
+          && isValidId(deviceId)
+          && isOwner(userId)
+          && isValidUserDevice(request.resource.data, userId, deviceId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'platform', 'isPlaying', 'activeTrackId', 'activeTrackTitle',
+            'activeTrackArtist', 'playbackPosition', 'batteryLevel', 'batteryCharging',
+            'bluetoothDeviceName', 'bluetoothBatteryLevel', 'lastSeen', 'updatedAt'
+          ])
+          && request.resource.data.deviceId == resource.data.deviceId
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.updatedAt == request.time;
+        allow delete: if isValidId(userId) && isValidId(deviceId) && isOwner(userId);
+      }
+
       match /friends/{friendId} {
-        allow get, list: if isValidId(userId) && isOwner(userId);
+        allow get: if isValidId(userId) && isValidId(friendId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
         allow create: if isValidId(userId)
           && isValidId(friendId)
           && isOwner(userId)
@@ -231,9 +339,97 @@ service cloud.firestore {
       }
     }
 
-    // Default deny catch-all
-    match /{document=**} {
-      allow read, write: if false;
+    // ===============================================================
+    // Public Profile Directory (PII-free: no email)
+    // ===============================================================
+    match /public_profiles/{userId} {
+      allow get: if isValidId(userId) && isSignedIn();
+      allow list: if isSignedIn()
+        && request.query.limit != null
+        && request.query.limit <= 20
+        && resource.data.uid is string;
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidPublicProfile(request.resource.data, userId)
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidPublicProfile(request.resource.data, userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name', 'handle', 'initials', 'avatarUrl', 'accentColor', 'updatedAt'
+        ])
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isValidId(userId) && isOwner(userId);
+    }
+
+    // ===============================================================
+    // Friend / Blend / Listen Party Invites
+    // ===============================================================
+    match /friend_requests/{requestId} {
+      allow get: if isValidId(requestId)
+        && isSignedIn()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow list: if isSignedIn()
+        && request.query.limit != null
+        && request.query.limit <= 20
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+      allow create: if isValidId(requestId)
+        && isSignedIn()
+        && isValidFriendRequest(request.resource.data, requestId)
+        && request.resource.data.fromUid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isValidId(requestId)
+        && isSignedIn()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid)
+        && isValidFriendRequest(request.resource.data, requestId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.fromUid == resource.data.fromUid
+        && request.resource.data.toUid == resource.data.toUid
+        && request.resource.data.kind == resource.data.kind
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isValidId(requestId)
+        && isSignedIn()
+        && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid);
+    }
+
+    // ===============================================================
+    // Synced Listen Parties
+    // ===============================================================
+    match /listen_parties/{partyId} {
+      allow get: if isValidId(partyId)
+        && isSignedIn()
+        && (resource.data.hostUid == request.auth.uid || resource.data.guestUid == request.auth.uid);
+      allow list: if isSignedIn()
+        && request.query.limit != null
+        && request.query.limit <= 20
+        && (resource.data.hostUid == request.auth.uid || resource.data.guestUid == request.auth.uid);
+      allow create: if isValidId(partyId)
+        && isSignedIn()
+        && isValidListenParty(request.resource.data, partyId)
+        && request.resource.data.hostUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if isValidId(partyId)
+        && isSignedIn()
+        && (resource.data.hostUid == request.auth.uid || resource.data.guestUid == request.auth.uid)
+        && isValidListenParty(request.resource.data, partyId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'activeTrackId', 'activeTrackTitle', 'activeTrackArtist',
+          'isPlaying', 'messages', 'updatedAt'
+        ])
+        && request.resource.data.id == resource.data.id
+        && request.resource.data.hostUid == resource.data.hostUid
+        && request.resource.data.guestUid == resource.data.guestUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if isValidId(partyId)
+        && isSignedIn()
+        && (resource.data.hostUid == request.auth.uid || resource.data.guestUid == request.auth.uid);
     }
   }
 }

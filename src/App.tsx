@@ -3,19 +3,32 @@ import { onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
 import { AddToPlaylistModal } from './components/AddToPlaylistModal';
 import { AuthGateScreen } from './components/AuthGateScreen';
 import { BottomDock } from './components/BottomDock';
+import {
+  CollectionDetailModal,
+  CollectionDetailTarget,
+} from './components/CollectionDetailModal';
 import { CreatePlaylistModal } from './components/CreatePlaylistModal';
+import { DesktopWorkspace } from './components/DesktopWorkspace';
 import { FullScreenPlayer } from './components/FullScreenPlayer';
+import { KlynLogo } from './components/KlynLogo';
 import { OnboardingFlow } from './components/OnboardingFlow';
-import { ProfileSettingsModal } from './components/ProfileSettingsModal';
+import { ProfileSettingsModal, SettingsSubPageId } from './components/ProfileSettingsModal';
 import { QueueDrawerModal } from './components/QueueDrawerModal';
+import { ShowDetailModal } from './components/ShowDetailModal';
 import { SocialInvitePopupModal } from './components/SocialInvitePopupModal';
 import { TopBar } from './components/TopBar';
 import { ActivityView } from './components/views/ActivityView';
 import { ArtistProfileView } from './components/views/ArtistProfileView';
 import { HomeView } from './components/views/HomeView';
 import { LibraryView } from './components/views/LibraryView';
+import { ReelsView } from './components/views/ReelsView';
 import { SearchView } from './components/views/SearchView';
 import { getLocalDateKey } from './data/catalog';
+import { useAudioDevices } from './hooks/useAudioDevices';
+import { useBatteryStatus } from './hooks/useBatteryStatus';
+import { useConnectivity } from './hooks/useConnectivity';
+import { useDeviceMode } from './hooks/useDeviceMode';
+import { connectAndSyncExternalApp } from './services/connectedApps';
 import {
   auth,
   isFirebaseConfigured,
@@ -23,8 +36,19 @@ import {
   signOutFirebase,
   testConnection,
 } from './services/firebase';
-import { playerEngine } from './services/playerEngine';
 import {
+  cacheTrackOffline,
+  clearDownloadedTracks,
+  getDownloadedTracks,
+  removeCachedTrack,
+  resetOfflineMemoryCaches,
+  setOfflineCacheUserScope,
+} from './services/offlineCache';
+import { playerEngine } from './services/playerEngine';
+import { episodeToTrack } from './services/podcastsApi';
+import {
+  AccountDeviceRecord,
+  ConnectedAppProvider,
   LikedSongsCustomization,
   ListenPartyMessage,
   ListeningLogEntry,
@@ -33,7 +57,11 @@ import {
   NavTab,
   PendingInvitePopup,
   PlaylistItem,
+  PodcastShow,
   RepeatMode,
+  ShowEpisode,
+  ShowProgressEntry,
+  ShuffleMode,
   SocialUser,
   TopFilterTab,
   Track,
@@ -45,75 +73,60 @@ import {
   deleteDownloadFromFirestore,
   hydrateUserFromFirestore,
   loadLocalUserCache,
+  subscribeAccountDevicesFromFirestore,
+  syncDeviceHeartbeatToFirestore,
   syncDownloadToFirestore,
   syncFriendToFirestore,
   syncPlaylistToFirestore,
+  syncPublicProfileToFirestore,
   syncUserProfileToFirestore,
 } from './utils/firestoreSync';
 import { generateKlynAiBlend } from './utils/klynAiBlend';
 import { fetchSyncedLyrics } from './utils/lrclibApi';
-import {
-  clearAllOfflineDownloadedTracks,
-  loadOfflineDownloadedTracks,
-  removeOfflineDownloadedTrack,
-  saveOfflineDownloadedTrack,
-} from './utils/offlineDownloads';
+import { requestNotificationPermission, sendKlynNotification } from './utils/notifications';
 import {
   DEFAULT_LIKED_SONGS_CUSTOMIZATION,
   EMPTY_LISTENING_STATS,
   clearActiveUserSession,
+  clearCurrentUserRuntimeCaches,
+  getOrCreateLocalDeviceIdentity,
   loadCentralizedAppState,
   saveCentralizedAppState,
+  setActiveStorageUserScope,
 } from './utils/storage';
 
 const DEFAULT_PREFERENCES: UserPreferences = {
   streamingQuality: 'Lossless',
   downloadQuality: 'Lossless',
-  spatialEnabled: true,
+  spatialEnabled: false,
   normalizeVolume: true,
   gaplessPlayback: true,
   crossfadeSeconds: 6,
   autoplaySimilar: true,
   autoScrollLyrics: true,
+  offlineMode: false,
+  playbackSpeed: 1,
   notifyNewReleases: true,
   notifyWrappedWeekly: true,
   notifyPlaylistUpdates: true,
   notifyPushAlerts: false,
   notifySocialInvites: true,
-  notifyStreakAlerts: true,
+  notifyStreakAlerts: false,
   listeningVisibility: true,
   privateSession: false,
   shareArtistAnalytics: true,
+  layoutMode: 'auto',
 };
-
-function computeStreakDays(activeDates: string[]): number {
-  if (activeDates.length === 0) return 0;
-  const dateSet = new Set(activeDates);
-  const cursor = new Date();
-  const todayKey = getLocalDateKey(cursor);
-
-  if (!dateSet.has(todayKey)) {
-    cursor.setDate(cursor.getDate() - 1);
-    if (!dateSet.has(getLocalDateKey(cursor))) {
-      return 0;
-    }
-  }
-
-  let streak = 0;
-  while (dateSet.has(getLocalDateKey(cursor))) {
-    streak += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return streak;
-}
 
 export default function App() {
   const initialCentralState = useMemo(() => loadCentralizedAppState(), []);
 
+  const [isRestoringSession, setIsRestoringSession] = useState<boolean>(() =>
+    Boolean(isFirebaseConfigured && auth),
+  );
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(
     () => initialCentralState?.user ?? null,
   );
-  const [isReplayOnboardingOpen, setIsReplayOnboardingOpen] = useState(false);
 
   const [activeNav, setActiveNav] = useState<NavTab>('Home');
   const [topFilter, setTopFilter] = useState<TopFilterTab>('All');
@@ -140,7 +153,7 @@ export default function App() {
 
   const [isPlayerOpen, setIsPlayerOpen] = useState<boolean>(false);
   const [showLyrics, setShowLyrics] = useState<boolean>(false);
-  const [isShuffled, setIsShuffled] = useState<boolean>(false);
+  const [shuffleMode, setShuffleMode] = useState<ShuffleMode>('off');
   const [repeatMode, setRepeatMode] = useState<RepeatMode>('all');
 
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(
@@ -158,6 +171,17 @@ export default function App() {
   );
   const [listeningStats, setListeningStats] = useState<ListeningStatsState>(
     () => initialCentralState?.listeningStats ?? EMPTY_LISTENING_STATS,
+  );
+
+  const [shows, setShows] = useState<PodcastShow[]>([]);
+  const [selectedShow, setSelectedShow] = useState<PodcastShow | null>(null);
+  const [selectedCollection, setSelectedCollection] =
+    useState<CollectionDetailTarget | null>(null);
+  const [recentSearches, setRecentSearches] = useState<string[]>(
+    () => initialCentralState?.recentSearches ?? [],
+  );
+  const [showProgress, setShowProgress] = useState<Record<string, ShowProgressEntry>>(
+    () => initialCentralState?.showProgress ?? {},
   );
 
   const [selectedArtistName, setSelectedArtistName] = useState<string | null>(null);
@@ -179,12 +203,20 @@ export default function App() {
         ? initialCentralState.activeDeviceId
         : 'system-default',
   );
+  const [accountDevices, setAccountDevices] = useState<AccountDeviceRecord[]>([]);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [settingsInitialSubPage, setSettingsInitialSubPage] = useState<SettingsSubPageId>(null);
   const [preferences, setPreferences] = useState<UserPreferences>(() => ({
     ...DEFAULT_PREFERENCES,
     ...(initialCentralState?.settings ?? {}),
   }));
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const { isOnline, showOnlineRestoredBanner } = useConnectivity();
+  const battery = useBatteryStatus();
+  const { bluetoothState, connectedBluetoothDevice } = useAudioDevices();
+  const { isDesktop } = useDeviceMode(preferences.layoutMode ?? 'auto');
+  const localDeviceIdentity = useMemo(() => getOrCreateLocalDeviceIdentity(), []);
 
   const isMountedRef = useRef<boolean>(true);
   const authSessionEpochRef = useRef<number>(0);
@@ -204,6 +236,8 @@ export default function App() {
   const authListenerAttachedRef = useRef<boolean>(false);
   const lastMediaMetadataKeyRef = useRef<string>('');
   const lastMediaPlaybackStateRef = useRef<'playing' | 'paused' | 'none'>('none');
+  const playedTrackKeysRef = useRef<Set<string>>(new Set());
+  const alertedReleaseIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -219,12 +253,15 @@ export default function App() {
     }, 2800);
   }, []);
 
-  // Load persisted offline downloaded tracks from IndexedDB (klyn_offline_db_v1) once on mount
+  // Load persisted offline downloaded tracks for active user scope once on mount
   useEffect(() => {
     if (offlineLoadedRef.current) return;
     offlineLoadedRef.current = true;
+    if (currentUser?.uid) {
+      setOfflineCacheUserScope(currentUser.uid);
+    }
     let active = true;
-    loadOfflineDownloadedTracks()
+    getDownloadedTracks()
       .then((tracks) => {
         if (active) setOfflineTracks(tracks);
       })
@@ -234,7 +271,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [currentUser?.uid]);
 
   // Register PWA app-shell service worker once on window load (loop-safe & sandbox-safe)
   useEffect(() => {
@@ -422,7 +459,7 @@ export default function App() {
           dailyMinutesByDate: nextDailyByDate,
           activeDates: nextDates,
           playEvents: nextEvents,
-          streakDays: computeStreakDays(nextDates),
+          streakDays: 0,
         };
       });
     }, 5000);
@@ -430,9 +467,55 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [isPlaying, activeTrack, preferences.privateSession]);
 
-  // Register newly discovered real external tracks into state pool
+  // Track show/episode resume progress cleanly while playing podcasts or audiobooks
+  useEffect(() => {
+    if (!isPlaying || !activeTrack) return;
+    if (!(activeTrack.isPodcastEpisode || activeTrack.isAudiobookChapter) || !activeTrack.showId) {
+      return;
+    }
+    const showId = activeTrack.showId;
+    const episodeId = activeTrack.id;
+    const speed = preferences.playbackSpeed ?? 1;
+    setShowProgress((prev) => {
+      const existing = prev[showId];
+      if (
+        existing &&
+        existing.episodeId === episodeId &&
+        Math.abs(existing.position - currentTime) < 3 &&
+        existing.speed === speed
+      ) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [showId]: {
+          showId,
+          episodeId,
+          position: currentTime,
+          speed,
+          updatedAt: Date.now(),
+        },
+      };
+    });
+  }, [isPlaying, activeTrack, currentTime, preferences.playbackSpeed]);
+
+  const followedArtistsRef = useRef(followedArtists);
+  followedArtistsRef.current = followedArtists;
+  const notifyPrefsRef = useRef({
+    notifyNewReleases: preferences.notifyNewReleases,
+    notifyPushAlerts: preferences.notifyPushAlerts,
+  });
+  notifyPrefsRef.current = {
+    notifyNewReleases: preferences.notifyNewReleases,
+    notifyPushAlerts: preferences.notifyPushAlerts,
+  };
+
+  // Register newly discovered real external tracks into state pool & trigger followed artist release notifications
   const handleRegisterDiscoveredTracks = useCallback((incoming: Track[]) => {
     if (incoming.length === 0) return;
+    const newFollowedReleases: Track[] = [];
+    const currentFollowed = followedArtistsRef.current;
+
     setDiscoveredTracks((prev) => {
       const map = new Map<string, Track>();
       for (const t of prev) map.set(t.id, t);
@@ -441,31 +524,60 @@ export default function App() {
         if (!map.has(t.id)) {
           added = true;
           map.set(t.id, t);
+          if (currentFollowed.has(t.artist) && !alertedReleaseIdsRef.current.has(t.id)) {
+            alertedReleaseIdsRef.current.add(t.id);
+            newFollowedReleases.push(t);
+          }
         }
       }
       if (!added) return prev;
       return Array.from(map.values()).slice(-180);
     });
+
+    if (
+      newFollowedReleases.length > 0 &&
+      notifyPrefsRef.current.notifyNewReleases &&
+      notifyPrefsRef.current.notifyPushAlerts
+    ) {
+      const first = newFollowedReleases[0];
+      void sendKlynNotification(
+        `New from ${first.artist}`,
+        `${first.title} is now streaming on klyn.`,
+        `release-${first.id}`,
+      );
+    }
   }, []);
 
-  // Centralized localStorage persistence (klyn_app_state_v1)
+  // Scoped localStorage persistence per user (no guest leak)
   useEffect(() => {
-    saveCentralizedAppState({
-      user: currentUser,
-      likedTrackIds: Array.from(favoriteIds),
-      playlists,
-      likedSongsCustomization,
-      followedArtistIds: Array.from(followedArtists),
-      queue,
-      currentTrack: activeTrack,
-      isPlaying,
-      currentTime,
-      listeningStats,
-      settings: preferences,
-      activeDeviceId,
-      socialUsers,
-      discoveredTracks,
-    });
+    if (!currentUser) return;
+    const scopeId = currentUser.uid || currentUser.id;
+    setActiveStorageUserScope(scopeId);
+    saveCentralizedAppState(
+      {
+        user: {
+          ...currentUser,
+          recentSearches,
+          showProgress,
+        },
+        likedTrackIds: Array.from(favoriteIds),
+        playlists,
+        likedSongsCustomization,
+        followedArtistIds: Array.from(followedArtists),
+        queue,
+        currentTrack: activeTrack,
+        isPlaying,
+        currentTime,
+        listeningStats,
+        settings: preferences,
+        activeDeviceId,
+        socialUsers,
+        discoveredTracks,
+        recentSearches,
+        showProgress,
+      },
+      scopeId,
+    );
   }, [
     currentUser,
     favoriteIds,
@@ -481,6 +593,8 @@ export default function App() {
     activeDeviceId,
     socialUsers,
     discoveredTracks,
+    recentSearches,
+    showProgress,
   ]);
 
   const repeatModeRef = useRef(repeatMode);
@@ -528,10 +642,32 @@ export default function App() {
     };
   }, []);
 
-  // Keep player volume synced with user audio normalization preference
+  // Keep player volume & playback speed synced with user preferences
   useEffect(() => {
     playerEngine.setVolume(preferences.normalizeVolume ? 0.85 : 0.96);
   }, [preferences.normalizeVolume]);
+
+  useEffect(() => {
+    playerEngine.setPlaybackRate(preferences.playbackSpeed ?? 1);
+  }, [preferences.playbackSpeed]);
+
+  // Pause main player engine cleanly while browsing KLYN Reels
+  useEffect(() => {
+    if (activeNav === 'Reels' && isPlaying) {
+      playerEngine.pause();
+      setIsPlaying(false);
+    }
+  }, [activeNav, isPlaying]);
+
+  // Prewarm next upcoming track when queue or active track changes
+  useEffect(() => {
+    if (!activeTrack || queue.length < 2) return;
+    const idx = queue.findIndex((t) => t.id === activeTrack.id);
+    const nextCandidate = idx >= 0 ? queue[(idx + 1) % queue.length] : queue[0];
+    if (nextCandidate && nextCandidate.id !== activeTrack.id && isOnline && !preferences.offlineMode) {
+      playerEngine.prewarmTrack(nextCandidate);
+    }
+  }, [activeTrack, queue, isOnline, preferences.offlineMode]);
 
   const isVerifiedFirebaseSession = useCallback(() => {
     return Boolean(
@@ -592,6 +728,13 @@ export default function App() {
         return;
       }
 
+      // Scope storage & IndexedDB immediately to this Firebase UID
+      setActiveStorageUserScope(uid);
+      setOfflineCacheUserScope(uid);
+      const scopedLocalState = loadCentralizedAppState(uid);
+      const scopedDownloads = await getDownloadedTracks().catch(() => []);
+      if (!isMountedRef.current || authSessionEpochRef.current !== sessionEpoch) return;
+
       const resolvedMeta = meta ?? pendingAuthMetaRef.current ?? undefined;
       const provider: 'google' | 'email' =
         resolvedMeta?.authProvider ??
@@ -621,21 +764,32 @@ export default function App() {
         avatarUrl: firebaseUser.photoURL ?? undefined,
         avatarStyle: 'monogram',
         accentColor: '#C27838',
-        favoriteGenres: ['Electronic', 'Spatial'],
+        favoriteGenres: ['Trap', 'R&B'],
         hasCompletedOnboarding: false,
         createdAt: new Date().toISOString(),
       };
 
       const runHydration = async () => {
         try {
+          const baseLiked = scopedLocalState?.likedTrackIds ?? [];
+          const baseFollowed = scopedLocalState?.followedArtistIds ?? [];
+          const baseDownloads = scopedDownloads.map((t) => t.id);
+          const basePrefs = scopedLocalState?.settings
+            ? { ...DEFAULT_PREFERENCES, ...scopedLocalState.settings }
+            : DEFAULT_PREFERENCES;
+          const baseLikedCust =
+            scopedLocalState?.likedSongsCustomization ?? DEFAULT_LIKED_SONGS_CUSTOMIZATION;
+          const baseDevice = scopedLocalState?.activeDeviceId || 'system-default';
+          const baseStats = scopedLocalState?.listeningStats ?? EMPTY_LISTENING_STATS;
+
           const hydrated = await hydrateUserFromFirestore(uid, fallbackUser, {
-            likedTrackIds: Array.from(favoriteIds),
-            followedArtistIds: Array.from(followedArtists),
-            downloadedTrackIds: offlineTracks.map((t) => t.id),
-            preferences,
-            likedSongsCustomization,
-            activeDeviceId,
-            listeningStats,
+            likedTrackIds: baseLiked,
+            followedArtistIds: baseFollowed,
+            downloadedTrackIds: baseDownloads,
+            preferences: basePrefs,
+            likedSongsCustomization: baseLikedCust,
+            activeDeviceId: baseDevice,
+            listeningStats: baseStats,
           });
 
           if (!isMountedRef.current || authSessionEpochRef.current !== sessionEpoch) return;
@@ -643,18 +797,18 @@ export default function App() {
           hydratedFirebaseUidRef.current = uid;
           pendingAuthMetaRef.current = null;
           setCurrentUser(hydrated.user);
+          void syncPublicProfileToFirestore(hydrated.user);
 
           if (!hydrated.isNewUser) {
             const nextPrefs = hydrated.preferences
-              ? { ...preferences, ...hydrated.preferences }
-              : preferences;
-            const nextLikedCust =
-              hydrated.likedSongsCustomization ?? likedSongsCustomization;
+              ? { ...DEFAULT_PREFERENCES, ...hydrated.preferences }
+              : basePrefs;
+            const nextLikedCust = hydrated.likedSongsCustomization ?? baseLikedCust;
             const nextDevice =
               hydrated.activeDeviceId && hydrated.activeDeviceId !== 'web-studio'
                 ? hydrated.activeDeviceId
-                : activeDeviceId;
-            const nextStats = hydrated.listeningStats ?? listeningStats;
+                : baseDevice;
+            const nextStats = hydrated.listeningStats ?? baseStats;
 
             lastSyncedFingerprintRef.current = JSON.stringify({
               user: hydrated.user,
@@ -673,43 +827,58 @@ export default function App() {
             setSocialUsers(
               Array.from(new Map(hydrated.socialUsers.map((u) => [u.id, u])).values()),
             );
-            if (hydrated.preferences) {
-              setPreferences((prev) => ({ ...prev, ...hydrated.preferences }));
-            }
-            if (hydrated.likedSongsCustomization) {
-              setLikedSongsCustomization(hydrated.likedSongsCustomization);
-            }
-            if (nextDevice) {
-              setActiveDeviceId(nextDevice);
-            }
-            if (hydrated.listeningStats) {
-              setListeningStats(hydrated.listeningStats);
-            }
+            setPreferences(nextPrefs);
+            setLikedSongsCustomization(nextLikedCust);
+            setActiveDeviceId(nextDevice);
+            setListeningStats(nextStats);
+            setRecentSearches(
+              hydrated.user.recentSearches ?? scopedLocalState?.recentSearches ?? [],
+            );
+            setShowProgress(
+              hydrated.user.showProgress ?? scopedLocalState?.showProgress ?? {},
+            );
 
             if (hydrated.downloadedTracks.length > 0) {
               handleRegisterDiscoveredTracks(hydrated.downloadedTracks);
               for (const dlTrack of hydrated.downloadedTracks) {
-                void saveOfflineDownloadedTrack(dlTrack).catch(() => {});
+                void cacheTrackOffline(dlTrack, { isDownloaded: true }).catch(() => {});
               }
               setOfflineTracks((prev) => {
                 const map = new Map<string, Track>();
                 for (const t of hydrated.downloadedTracks) map.set(t.id, { ...t, downloaded: true });
+                for (const t of scopedDownloads) {
+                  if (!map.has(t.id)) map.set(t.id, { ...t, downloaded: true });
+                }
                 for (const t of prev) {
                   if (!map.has(t.id)) map.set(t.id, { ...t, downloaded: true });
                 }
                 return Array.from(map.values());
               });
+            } else {
+              setOfflineTracks(scopedDownloads);
             }
           } else {
+            setPlaylists(scopedLocalState?.playlists ?? []);
+            setFavoriteIds(new Set(baseLiked));
+            setFollowedArtists(new Set(baseFollowed));
+            setSocialUsers(scopedLocalState?.socialUsers ?? []);
+            setPreferences(basePrefs);
+            setLikedSongsCustomization(baseLikedCust);
+            setActiveDeviceId(baseDevice);
+            setListeningStats(baseStats);
+            setRecentSearches(scopedLocalState?.recentSearches ?? []);
+            setShowProgress(scopedLocalState?.showProgress ?? {});
+            setOfflineTracks(scopedDownloads);
+
             lastSyncedFingerprintRef.current = JSON.stringify({
               user: hydrated.user,
-              likedTrackIds: Array.from(favoriteIds),
-              followedArtistIds: Array.from(followedArtists),
-              downloadedTrackIds: offlineTracks.map((t) => t.id),
-              preferences,
-              likedSongsCustomization,
-              activeDeviceId,
-              listeningStats,
+              likedTrackIds: baseLiked,
+              followedArtistIds: baseFollowed,
+              downloadedTrackIds: baseDownloads,
+              preferences: basePrefs,
+              likedSongsCustomization: baseLikedCust,
+              activeDeviceId: baseDevice,
+              listeningStats: baseStats,
             });
           }
 
@@ -729,8 +898,9 @@ export default function App() {
           hydratedFirebaseUidRef.current = uid;
           pendingAuthMetaRef.current = null;
           setCurrentUser(recoveredUser);
+          setOfflineTracks(scopedDownloads);
           if (localCached?.preferences) {
-            setPreferences((prev) => ({ ...prev, ...localCached.preferences }));
+            setPreferences({ ...DEFAULT_PREFERENCES, ...localCached.preferences });
           }
           if (localCached?.likedTrackIds?.length) {
             setFavoriteIds(new Set(localCached.likedTrackIds));
@@ -744,6 +914,8 @@ export default function App() {
           if (localCached?.listeningStats) {
             setListeningStats(localCached.listeningStats);
           }
+          setRecentSearches(recoveredUser.recentSearches ?? scopedLocalState?.recentSearches ?? []);
+          setShowProgress(recoveredUser.showProgress ?? scopedLocalState?.showProgress ?? {});
         } finally {
           if (activeHydrationUidRef.current === uid) {
             activeHydrationUidRef.current = null;
@@ -757,26 +929,41 @@ export default function App() {
       activeHydrationPromiseRef.current = promise;
       await promise;
     },
-    [
-      favoriteIds,
-      followedArtists,
-      offlineTracks,
-      preferences,
-      likedSongsCustomization,
-      activeDeviceId,
-      listeningStats,
-      handleRegisterDiscoveredTracks,
-      showToast,
-    ],
+    [handleRegisterDiscoveredTracks, showToast],
   );
 
   const hydrateFirebaseUserSessionRef = useRef(hydrateFirebaseUserSession);
   hydrateFirebaseUserSessionRef.current = hydrateFirebaseUserSession;
 
+  const resetUserScopedRuntimeState = useCallback(() => {
+    setPlaylists([]);
+    setFavoriteIds(new Set());
+    setFollowedArtists(new Set());
+    setSocialUsers([]);
+    setOfflineTracks([]);
+    setDiscoveredTracks([]);
+    setQueue([]);
+    setActiveTrackId('');
+    setCurrentTime(0);
+    setLiveDuration(0);
+    setIsPlaying(false);
+    setListeningStats(EMPTY_LISTENING_STATS);
+    setRecentSearches([]);
+    setShowProgress({});
+    setAccountDevices([]);
+    setSelectedShow(null);
+    setSelectedArtistName(null);
+    setPreferences(DEFAULT_PREFERENCES);
+    setLikedSongsCustomization(DEFAULT_LIKED_SONGS_CUSTOMIZATION);
+  }, []);
+
   // Test Firestore connection and restore active Firebase Auth session once on mount
   useEffect(() => {
     if (authListenerAttachedRef.current) return;
-    if (!isFirebaseConfigured || !auth) return;
+    if (!isFirebaseConfigured || !auth) {
+      setIsRestoringSession(false);
+      return;
+    }
     authListenerAttachedRef.current = true;
 
     void testConnection().catch(() => false);
@@ -791,11 +978,24 @@ export default function App() {
               if (!isFirestoreOfflineError(err)) {
                 console.warn('Firebase session restore fallback:', err);
               }
+            })
+            .finally(() => {
+              if (isMountedRef.current) setIsRestoringSession(false);
             });
+        } else if (isMountedRef.current) {
+          hydratedFirebaseUidRef.current = null;
+          clearActiveUserSession();
+          clearCurrentUserRuntimeCaches();
+          resetOfflineMemoryCaches();
+          setOfflineCacheUserScope(null);
+          setActiveStorageUserScope(null);
+          setCurrentUser(null);
+          resetUserScopedRuntimeState();
+          setIsRestoringSession(false);
         }
       });
     } catch {
-      // Ignore restricted auth state observer errors
+      setIsRestoringSession(false);
     }
 
     return () => {
@@ -806,7 +1006,7 @@ export default function App() {
         // Ignore cleanup errors
       }
     };
-  }, []);
+  }, [resetUserScopedRuntimeState]);
 
   // Debounced Cloud Firestore profile & preferences sync (loop-guarded by payload fingerprint)
   useEffect(() => {
@@ -819,7 +1019,11 @@ export default function App() {
     }
 
     const payload = {
-      user: currentUser,
+      user: {
+        ...currentUser,
+        recentSearches,
+        showProgress,
+      },
       likedTrackIds: Array.from(favoriteIds),
       followedArtistIds: Array.from(followedArtists),
       downloadedTrackIds: offlineTracks.map((t) => t.id),
@@ -854,10 +1058,76 @@ export default function App() {
     likedSongsCustomization,
     activeDeviceId,
     listeningStats,
+    recentSearches,
+    showProgress,
+  ]);
+
+  // Firestore Cross-Device Heartbeat & Live Account Devices Subscription
+  useEffect(() => {
+    if (!isFirebaseConfigured || !auth || !currentUser?.uid) {
+      setAccountDevices([]);
+      return;
+    }
+    if (!auth.currentUser || auth.currentUser.uid !== currentUser.uid || auth.currentUser.isAnonymous) {
+      return;
+    }
+    const uid = currentUser.uid;
+    const unsubscribe = subscribeAccountDevicesFromFirestore(
+      uid,
+      localDeviceIdentity.deviceId,
+      (devices) => {
+        if (isMountedRef.current) setAccountDevices(devices);
+      },
+    );
+    return () => unsubscribe();
+  }, [currentUser?.uid, localDeviceIdentity.deviceId]);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !auth || !currentUser?.uid) return;
+    if (!auth.currentUser || auth.currentUser.uid !== currentUser.uid || auth.currentUser.isAnonymous) {
+      return;
+    }
+    const uid = currentUser.uid;
+
+    const sendHeartbeat = () => {
+      const track = activeTrackRef.current;
+      void syncDeviceHeartbeatToFirestore(uid, {
+        deviceId: localDeviceIdentity.deviceId,
+        name: localDeviceIdentity.name,
+        platform: localDeviceIdentity.platform,
+        isCurrentDevice: true,
+        isPlaying,
+        activeTrackId: track?.id,
+        activeTrackTitle: track?.title,
+        activeTrackArtist: track?.artist,
+        playbackPosition: Math.round(currentTimeRef.current),
+        batteryLevel: battery.level,
+        batteryCharging: battery.charging,
+        bluetoothDeviceName: connectedBluetoothDevice?.name,
+        bluetoothBatteryLevel: connectedBluetoothDevice?.batteryLevel ?? null,
+        lastSeen: Date.now(),
+      });
+    };
+
+    sendHeartbeat();
+    const intervalId = window.setInterval(sendHeartbeat, 20000);
+    return () => window.clearInterval(intervalId);
+  }, [
+    currentUser?.uid,
+    localDeviceIdentity,
+    isPlaying,
+    activeTrackId,
+    battery.level,
+    battery.charging,
+    connectedBluetoothDevice?.name,
+    connectedBluetoothDevice?.batteryLevel,
   ]);
 
   const handleAuthenticate = useCallback(
     (account: UserAccount) => {
+      const scopeId = account.uid || account.id;
+      setActiveStorageUserScope(scopeId);
+      setOfflineCacheUserScope(scopeId);
       setCurrentUser(account);
       if (account.hasCompletedOnboarding) {
         showToast(`Welcome back to klyn, ${account.name.split(' ')[0]}`);
@@ -880,13 +1150,29 @@ export default function App() {
   );
 
   const handleCompleteOnboarding = useCallback(
-    (updatedUser: UserAccount, updatedPrefs: Partial<UserPreferences>) => {
+    (
+      updatedUser: UserAccount,
+      updatedPrefs: Partial<UserPreferences>,
+      importedTracks?: Track[],
+      importedPlaylists?: PlaylistItem[],
+    ) => {
       setCurrentUser(updatedUser);
       setPreferences((prev) => ({ ...prev, ...updatedPrefs }));
-      setIsReplayOnboardingOpen(false);
+      if (importedTracks && importedTracks.length > 0) {
+        handleRegisterDiscoveredTracks(importedTracks);
+      }
+      if (importedPlaylists && importedPlaylists.length > 0) {
+        setPlaylists((prev) => [...importedPlaylists, ...prev]);
+        if (updatedUser.uid && isFirebaseConfigured && auth?.currentUser?.uid === updatedUser.uid) {
+          for (const pl of importedPlaylists) {
+            void syncPlaylistToFirestore(updatedUser.uid, pl).catch(() => {});
+          }
+        }
+      }
+      void syncPublicProfileToFirestore(updatedUser);
       showToast(`Your klyn soundstage is ready, ${updatedUser.name.split(' ')[0]}`);
     },
-    [showToast],
+    [handleRegisterDiscoveredTracks, showToast],
   );
 
   const handleSignOut = useCallback(() => {
@@ -898,15 +1184,19 @@ export default function App() {
     pendingAuthMetaRef.current = null;
     lastSyncedFingerprintRef.current = '';
     clearActiveUserSession();
+    clearCurrentUserRuntimeCaches();
+    resetOfflineMemoryCaches();
+    setOfflineCacheUserScope(null);
+    setActiveStorageUserScope(null);
     void signOutFirebase().catch(() => {
       // ignore sign-out errors if running local profile
     });
     setCurrentUser(null);
-    setIsReplayOnboardingOpen(false);
+    resetUserScopedRuntimeState();
     setIsPlayerOpen(false);
     setIsSettingsOpen(false);
-    setIsPlaying(false);
-  }, []);
+    setSettingsInitialSubPage(null);
+  }, [resetUserScopedRuntimeState]);
 
   const handleSelectDevice = useCallback((deviceId: string) => {
     setActiveDeviceId(deviceId);
@@ -971,23 +1261,91 @@ export default function App() {
           },
           recentTrackIds: Array.from(new Set(updatedRecentLog.map((e) => e.trackId))),
           recentLog: updatedRecentLog,
-          streakDays: computeStreakDays(nextActiveDates),
+          streakDays: 0,
         };
       });
     },
     [preferences.privateSession, handleRegisterDiscoveredTracks],
   );
 
-  const goToNextTrack = useCallback(() => {
-    if (queue.length === 0) return;
-    const currentIndex = activeTrack ? queue.findIndex((t) => t.id === activeTrack.id) : -1;
+  const pickSmartShuffleCandidate = useCallback(
+    (pool: Track[], current: Track | null): Track | null => {
+      const candidates = pool.filter(
+        (t) =>
+          t.id !== current?.id &&
+          (!preferences.offlineMode && isOnline ? true : downloadedTrackIds.has(t.id)),
+      );
+      if (candidates.length === 0) return null;
 
-    if (isShuffled && queue.length > 1) {
-      let nextIdx = currentIndex;
-      while (nextIdx === currentIndex) {
-        nextIdx = Math.floor(Math.random() * queue.length);
+      let unplayed = candidates.filter((t) => !playedTrackKeysRef.current.has(t.id));
+      if (unplayed.length === 0) {
+        playedTrackKeysRef.current.clear();
+        if (current) playedTrackKeysRef.current.add(current.id);
+        unplayed = candidates;
       }
-      const nextTrack = queue[nextIdx];
+
+      const genreWeights = new Set((currentUser?.favoriteGenres ?? []).map((g) => g.toLowerCase()));
+      const scored = unplayed.map((t) => {
+        let score = Math.random() * 1.5;
+        if (current && t.genre.toLowerCase() === current.genre.toLowerCase()) score += 4;
+        if (genreWeights.has(t.genre.toLowerCase())) score += 2.5;
+        if (favoriteIds.has(t.id)) score += 2;
+        if (followedArtists.has(t.artist)) score += 2;
+        return { track: t, score };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      return scored[0]?.track ?? null;
+    },
+    [
+      currentUser?.favoriteGenres,
+      downloadedTrackIds,
+      favoriteIds,
+      followedArtists,
+      isOnline,
+      preferences.offlineMode,
+    ],
+  );
+
+  const goToNextTrack = useCallback(() => {
+    if (queue.length === 0 && shuffleMode !== 'smart') return;
+    const currentIndex = activeTrack ? queue.findIndex((t) => t.id === activeTrack.id) : -1;
+    if (activeTrack) playedTrackKeysRef.current.add(activeTrack.id);
+
+    if (shuffleMode === 'smart') {
+      const combinedPool = Array.from(
+        new Map([...queue, ...allKnownTracksRef.current].map((t) => [t.id, t])).values(),
+      );
+      const nextTrack = pickSmartShuffleCandidate(combinedPool, activeTrack);
+      if (nextTrack) {
+        playedTrackKeysRef.current.add(nextTrack.id);
+        if (!queue.some((t) => t.id === nextTrack.id)) {
+          setQueue((prev) => [...prev, nextTrack]);
+        }
+        setActiveTrackId(nextTrack.id);
+        setCurrentTime(0);
+        setLiveDuration(0);
+        setIsPlaying(true);
+        recordTrackPlay(nextTrack);
+        void playerEngine.playTrack(nextTrack, 0);
+        return;
+      }
+    }
+
+    if (shuffleMode === 'shuffle' && queue.length > 1) {
+      let unplayed = queue.filter(
+        (t) => t.id !== activeTrack?.id && !playedTrackKeysRef.current.has(t.id),
+      );
+      if (unplayed.length === 0) {
+        playedTrackKeysRef.current.clear();
+        if (activeTrack) playedTrackKeysRef.current.add(activeTrack.id);
+        unplayed = queue.filter((t) => t.id !== activeTrack?.id);
+      }
+      const nextTrack = unplayed[Math.floor(Math.random() * unplayed.length)] ?? queue[0];
+      if ((!isOnline || preferences.offlineMode) && !downloadedTrackIds.has(nextTrack.id)) {
+        showToast('Track unavailable offline — download first');
+        return;
+      }
+      playedTrackKeysRef.current.add(nextTrack.id);
       setActiveTrackId(nextTrack.id);
       setCurrentTime(0);
       setLiveDuration(0);
@@ -1000,6 +1358,10 @@ export default function App() {
     const nextIndex = currentIndex + 1;
     if (nextIndex < queue.length) {
       const nextTrack = queue[nextIndex];
+      if ((!isOnline || preferences.offlineMode) && !downloadedTrackIds.has(nextTrack.id)) {
+        showToast('Track unavailable offline — download first');
+        return;
+      }
       setActiveTrackId(nextTrack.id);
       setCurrentTime(0);
       setLiveDuration(0);
@@ -1008,6 +1370,11 @@ export default function App() {
       void playerEngine.playTrack(nextTrack, 0);
     } else if (repeatMode === 'all' || preferences.autoplaySimilar) {
       const nextTrack = queue[0];
+      if (!nextTrack) return;
+      if ((!isOnline || preferences.offlineMode) && !downloadedTrackIds.has(nextTrack.id)) {
+        showToast('Track unavailable offline — download first');
+        return;
+      }
       setActiveTrackId(nextTrack.id);
       setCurrentTime(0);
       setLiveDuration(0);
@@ -1019,7 +1386,19 @@ export default function App() {
       setIsPlaying(false);
       playerEngine.pause();
     }
-  }, [queue, activeTrack, isShuffled, repeatMode, preferences.autoplaySimilar, recordTrackPlay]);
+  }, [
+    queue,
+    activeTrack,
+    shuffleMode,
+    repeatMode,
+    preferences.autoplaySimilar,
+    preferences.offlineMode,
+    isOnline,
+    downloadedTrackIds,
+    pickSmartShuffleCandidate,
+    recordTrackPlay,
+    showToast,
+  ]);
 
   const goToPrevTrack = useCallback(() => {
     if (queue.length === 0) return;
@@ -1031,13 +1410,26 @@ export default function App() {
     const currentIndex = activeTrack ? queue.findIndex((t) => t.id === activeTrack.id) : 0;
     const prevIndex = currentIndex <= 0 ? queue.length - 1 : currentIndex - 1;
     const prevTrack = queue[prevIndex];
+    if ((!isOnline || preferences.offlineMode) && !downloadedTrackIds.has(prevTrack.id)) {
+      showToast('Track unavailable offline — download first');
+      return;
+    }
     setActiveTrackId(prevTrack.id);
     setCurrentTime(0);
     setLiveDuration(0);
     setIsPlaying(true);
     recordTrackPlay(prevTrack);
     void playerEngine.playTrack(prevTrack, 0);
-  }, [currentTime, queue, activeTrack, recordTrackPlay]);
+  }, [
+    currentTime,
+    queue,
+    activeTrack,
+    isOnline,
+    preferences.offlineMode,
+    downloadedTrackIds,
+    recordTrackPlay,
+    showToast,
+  ]);
 
   const goToNextTrackRef = useRef(goToNextTrack);
   goToNextTrackRef.current = goToNextTrack;
@@ -1072,6 +1464,11 @@ export default function App() {
 
   const handlePlayTrack = useCallback(
     (track: Track, newQueueList?: Track[], startAtTime = 0, openFullPlayer = true) => {
+      if ((!isOnline || preferences.offlineMode) && !downloadedTrackIds.has(track.id)) {
+        showToast('Track unavailable offline — download first');
+        return;
+      }
+
       handleRegisterDiscoveredTracks([track]);
       if (newQueueList && newQueueList.length > 0) {
         const dedupedQueue = Array.from(
@@ -1084,6 +1481,7 @@ export default function App() {
           prev.some((t) => t.id === track.id) ? prev : [track, ...prev],
         );
       }
+      playedTrackKeysRef.current.add(track.id);
       setActiveTrackId(track.id);
       setCurrentTime(startAtTime);
       setLiveDuration(0);
@@ -1101,14 +1499,33 @@ export default function App() {
         });
       }
     },
-    [recordTrackPlay, activePartyFriendId, currentUser, handleRegisterDiscoveredTracks],
+    [
+      isOnline,
+      preferences.offlineMode,
+      downloadedTrackIds,
+      recordTrackPlay,
+      activePartyFriendId,
+      currentUser,
+      handleRegisterDiscoveredTracks,
+      showToast,
+    ],
   );
 
   const handleTogglePlay = useCallback(() => {
-    if (!activeTrackRef.current) return;
+    const current = activeTrackRef.current;
+    if (!current) return;
+    if (
+      !playerEngine.getIsPlaying() &&
+      (!isOnline || preferences.offlineMode) &&
+      !downloadedTrackIds.has(current.id)
+    ) {
+      showToast('Track unavailable offline — download first');
+      return;
+    }
+
     if (playerEngine.getSource() === 'idle') {
       setIsPlaying(true);
-      void playerEngine.playTrack(activeTrackRef.current, currentTimeRef.current);
+      void playerEngine.playTrack(current, currentTimeRef.current);
       if (activePartyFriendId) {
         broadcastRef.current?.postMessage({ type: 'party-toggle-play', isPlaying: true });
       }
@@ -1124,7 +1541,13 @@ export default function App() {
         isPlaying: nextExpected,
       });
     }
-  }, [activePartyFriendId]);
+  }, [activePartyFriendId, isOnline, preferences.offlineMode, downloadedTrackIds, showToast]);
+
+  const handleDismissMiniPlayer = useCallback(() => {
+    playerEngine.pause();
+    setIsPlaying(false);
+    setActiveTrackId('');
+  }, []);
 
   const handleSeek = useCallback(
     (time: number) => {
@@ -1135,6 +1558,132 @@ export default function App() {
     },
     [effectiveTrack?.duration],
   );
+
+  const handleSkipBy = useCallback(
+    (seconds: number) => {
+      playerEngine.skipBy(seconds);
+      setCurrentTime((prev) => Math.max(0, prev + seconds));
+    },
+    [],
+  );
+
+  const handleChangePlaybackSpeed = useCallback((speed: number) => {
+    setPreferences((prev) => ({ ...prev, playbackSpeed: speed }));
+    playerEngine.setPlaybackRate(speed);
+  }, []);
+
+  const handlePlayEpisode = useCallback(
+    (show: PodcastShow, episode: ShowEpisode, resumeAt: number, speed: number) => {
+      const track = episodeToTrack(show, episode);
+      const showQueue = show.episodes.map((ep) => episodeToTrack(show, ep));
+      setPreferences((prev) => ({ ...prev, playbackSpeed: speed }));
+      playerEngine.setPlaybackRate(speed);
+      handlePlayTrack(track, showQueue.length > 0 ? showQueue : [track], resumeAt, false);
+    },
+    [handlePlayTrack],
+  );
+
+  const handleTransferPlaybackToDevice = useCallback(
+    (device: AccountDeviceRecord) => {
+      if (!device.activeTrackId) return;
+      const matched = allKnownTracksRef.current.find((t) => t.id === device.activeTrackId);
+      if (!matched) {
+        showToast(`Load "${device.activeTrackTitle || 'Track'}" on this device to resume`);
+        return;
+      }
+      handlePlayTrack(matched, queue, device.playbackPosition ?? 0, true);
+      showToast(`Handoff from ${device.name}: playing "${matched.title}"`);
+    },
+    [handlePlayTrack, queue, showToast],
+  );
+
+  const handleConnectApp = useCallback(
+    async (provider: ConnectedAppProvider, handleOrUrl: string) => {
+      if (!currentUser) return;
+      const result = await connectAndSyncExternalApp(provider, handleOrUrl);
+      if (result.importedTracks.length > 0) {
+        handleRegisterDiscoveredTracks(result.importedTracks);
+      }
+      if (result.importedPlaylist) {
+        setPlaylists((prev) => [
+          result.importedPlaylist!,
+          ...prev.filter((p) => p.sourceProvider !== provider),
+        ]);
+        if (currentUser.uid && isVerifiedFirebaseSession()) {
+          void syncPlaylistToFirestore(currentUser.uid, result.importedPlaylist).catch(() => {});
+        }
+      }
+      const updatedUser: UserAccount = {
+        ...currentUser,
+        connectedApps: {
+          ...(currentUser.connectedApps ?? {}),
+          [provider]: result.entry,
+        },
+      };
+      setCurrentUser(updatedUser);
+      showToast(
+        result.importedTracks.length > 0
+          ? `Synced ${result.importedTracks.length} tracks from ${provider}`
+          : `Connected ${provider}`,
+      );
+    },
+    [currentUser, handleRegisterDiscoveredTracks, isVerifiedFirebaseSession, showToast],
+  );
+
+  const handleDisconnectApp = useCallback(
+    (provider: ConnectedAppProvider) => {
+      if (!currentUser) return;
+      const nextApps = { ...(currentUser.connectedApps ?? {}) };
+      delete nextApps[provider];
+      setCurrentUser({ ...currentUser, connectedApps: nextApps });
+      showToast(`Disconnected ${provider}`);
+    },
+    [currentUser, showToast],
+  );
+
+  const handleRequestNotifications = useCallback(async () => {
+    const result = await requestNotificationPermission();
+    const granted = result === 'granted';
+    setPreferences((prev) => ({ ...prev, notifyPushAlerts: granted }));
+    if (currentUser) {
+      setCurrentUser({ ...currentUser, notificationsEnabled: granted });
+    }
+    if (granted) {
+      showToast('KLYN notifications enabled');
+      void sendKlynNotification('KLYN Alerts Active', 'You will be notified of new releases.');
+    } else if (result === 'denied') {
+      showToast('Notifications blocked in browser settings');
+    } else {
+      showToast('Notifications unavailable in this browser');
+    }
+  }, [currentUser, showToast]);
+
+  const handleCycleShuffle = useCallback(() => {
+    setShuffleMode((prev) => {
+      const next: ShuffleMode = prev === 'off' ? 'shuffle' : prev === 'shuffle' ? 'smart' : 'off';
+      showToast(
+        next === 'off' ? 'Shuffle Off' : next === 'shuffle' ? 'Shuffle On' : 'Smart Shuffle On',
+      );
+      return next;
+    });
+  }, [showToast]);
+
+  const handleAddRecentSearch = useCallback((term: string) => {
+    const clean = term.trim();
+    if (!clean) return;
+    setRecentSearches((prev) => [
+      clean,
+      ...prev.filter((t) => t.toLowerCase() !== clean.toLowerCase()),
+    ].slice(0, 15));
+  }, []);
+
+  const handleRemoveRecentSearch = useCallback((term: string) => {
+    setRecentSearches((prev) => prev.filter((t) => t !== term));
+  }, []);
+
+  const handleClearRecentSearches = useCallback(() => {
+    setRecentSearches([]);
+  }, []);
 
   const handleMediaPlay = useCallback(() => {
     if (!activeTrackRef.current) return;
@@ -1275,13 +1824,13 @@ export default function App() {
     });
   }, []);
 
-  // Offline App Downloads Management (IndexedDB + localStorage + Cloud Firestore)
+  // Offline App Downloads Management (IndexedDB offlineCache + Cloud Firestore)
   const handleToggleDownload = useCallback(
     (track: Track) => {
       const isAlreadyDownloaded = downloadedTrackIds.has(track.id);
       if (isAlreadyDownloaded) {
         setOfflineTracks((prev) => prev.filter((t) => t.id !== track.id));
-        void removeOfflineDownloadedTrack(track.id);
+        void removeCachedTrack(track.id);
         if (currentUser?.uid && isVerifiedFirebaseSession()) {
           void deleteDownloadFromFirestore(currentUser.uid, track.id).catch((err) => {
             console.error('Firestore delete download failed:', err);
@@ -1297,7 +1846,7 @@ export default function App() {
         downloadedCopy,
         ...prev.filter((t) => t.id !== downloadedCopy.id),
       ]);
-      void saveOfflineDownloadedTrack(downloadedCopy);
+      void cacheTrackOffline(downloadedCopy, { isDownloaded: true });
       if (currentUser?.uid && isVerifiedFirebaseSession()) {
         void syncDownloadToFirestore(currentUser.uid, downloadedCopy).catch((err) => {
           console.error('Firestore save download failed:', err);
@@ -1336,7 +1885,7 @@ export default function App() {
       });
 
       for (const copy of copies) {
-        void saveOfflineDownloadedTrack(copy);
+        void cacheTrackOffline(copy, { isDownloaded: true });
         if (currentUser?.uid && isVerifiedFirebaseSession()) {
           void syncDownloadToFirestore(currentUser.uid, copy).catch((err) => {
             console.error('Firestore batch download failed:', err);
@@ -1360,7 +1909,7 @@ export default function App() {
   const handleClearDownloads = useCallback(() => {
     const idsToRemove = offlineTracks.map((t) => t.id);
     setOfflineTracks([]);
-    void clearAllOfflineDownloadedTracks();
+    void clearDownloadedTracks();
     if (currentUser?.uid && isVerifiedFirebaseSession()) {
       for (const trackId of idsToRemove) {
         void deleteDownloadFromFirestore(currentUser.uid, trackId).catch((err) => {
@@ -1606,21 +2155,6 @@ export default function App() {
       if (!raw && !prebuilt) return;
       const handle =
         prebuilt?.handle ?? `@${raw.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'friend'}`;
-      const displayName =
-        prebuilt?.name ??
-        raw
-          .split(/[\s._-]+/)
-          .filter(Boolean)
-          .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
-          .join(' ');
-      const initials =
-        prebuilt?.initials ??
-        (displayName
-          .split(/\s+/)
-          .filter(Boolean)
-          .slice(0, 2)
-          .map((p) => p[0].toUpperCase())
-          .join('') || 'FR');
 
       const existing = socialUsers.find(
         (u) =>
@@ -1628,23 +2162,15 @@ export default function App() {
           u.handle.toLowerCase() === handle.toLowerCase(),
       );
 
+      // Only add verified real users (existing or returned from Firestore public_profiles)
+      if (!existing && !prebuilt) {
+        showToast('No matching KLYN listener found');
+        return;
+      }
+
       const syncedEntry: SocialUser = existing
         ? { ...existing, isFriend: true }
-        : prebuilt
-          ? { ...prebuilt, isFriend: true }
-          : {
-              id: `friend-${Date.now()}`,
-              name: displayName || raw,
-              handle,
-              initials,
-              isFriend: true,
-              isOnline: true,
-              currentTrackId: activeTrackRef.current?.id ?? '',
-              lastActiveLabel: 'Added just now',
-              topTrackIds: allKnownTracksRef.current.slice(0, 3).map((t) => t.id),
-              tasteMatchPct: 86,
-              accentColor: '#7D2332',
-            };
+        : { ...prebuilt!, isFriend: true };
 
       setSocialUsers((prev) => {
         const idx = prev.findIndex((u) => u.id === syncedEntry.id);
@@ -1660,7 +2186,7 @@ export default function App() {
           console.error('Firestore friend sync failed:', err);
         });
       }
-      showToast(`Added ${displayName || handle} to friends`);
+      showToast(`Added ${syncedEntry.name || handle} to friends`);
     },
     [socialUsers, currentUser?.uid, isVerifiedFirebaseSession, showToast],
   );
@@ -1891,15 +2417,13 @@ export default function App() {
   const handleUpdateUser = useCallback(
     (updatedUser: UserAccount) => {
       setCurrentUser(updatedUser);
+      void syncPublicProfileToFirestore(updatedUser);
       showToast('Profile updated');
     },
     [showToast],
   );
 
-  const audioStatusLabel = [
-    preferences.streamingQuality,
-    preferences.spatialEnabled ? 'Spatial Audio' : 'Stereo',
-  ].join(' · ');
+  const audioStatusLabel = preferences.streamingQuality;
 
   const scrollMainToTop = useCallback(() => {
     mainScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' });
@@ -1908,6 +2432,15 @@ export default function App() {
   useEffect(() => {
     scrollMainToTop();
   }, [activeNav, selectedArtistName, currentUser?.hasCompletedOnboarding, scrollMainToTop]);
+
+  // 0. FIREBASE AUTH SESSION RESTORE SPLASH
+  if (isRestoringSession) {
+    return (
+      <div className="flex h-[100dvh] w-full flex-col items-center justify-center bg-[#000000] text-white">
+        <KlynLogo size={76} pulse />
+      </div>
+    );
+  }
 
   // 1. MANDATORY FIRST-ENTRY LOG IN / SIGN UP GATE
   if (!currentUser) {
@@ -1919,14 +2452,12 @@ export default function App() {
     );
   }
 
-  // 2. FIRST-TIME OR REPLAYED ONBOARDING FLOW
-  if (!currentUser.hasCompletedOnboarding || isReplayOnboardingOpen) {
+  // 2. FIRST-TIME ONBOARDING FLOW (STRICTLY ONCE)
+  if (!currentUser.hasCompletedOnboarding) {
     return (
       <OnboardingFlow
         user={currentUser}
         preferences={preferences}
-        isReplay={isReplayOnboardingOpen && currentUser.hasCompletedOnboarding}
-        onCancelReplay={() => setIsReplayOnboardingOpen(false)}
         onComplete={handleCompleteOnboarding}
       />
     );
@@ -1934,6 +2465,154 @@ export default function App() {
 
   const ambientPrimary = activeTrack?.primaryColor ?? '#27272a';
   const ambientSecondary = activeTrack?.secondaryColor ?? '#09090b';
+  const isReelsCanvas = activeNav === 'Reels' && !selectedArtistName;
+
+  const activePageContent = selectedArtistName ? (
+    <ArtistProfileView
+      artistName={selectedArtistName}
+      tracks={allKnownTracks}
+      activeTrackId={activeTrack?.id ?? ''}
+      isPlaying={isPlaying}
+      isFollowing={followedArtists.has(selectedArtistName)}
+      favoriteIds={favoriteIds}
+      downloadedTrackIds={downloadedTrackIds}
+      onBack={() => setSelectedArtistName(null)}
+      onToggleFollow={handleToggleFollow}
+      onPlayTrack={handlePlayTrack}
+      onTogglePlay={handleTogglePlay}
+      onOpenPlayer={() => setIsPlayerOpen(true)}
+      onToggleFavorite={handleToggleFavorite}
+      onToggleDownload={handleToggleDownload}
+      onOpenAddToPlaylist={setPlaylistModalTrack}
+      onRegisterTracks={handleRegisterDiscoveredTracks}
+    />
+  ) : (
+    <>
+      {activeNav === 'Home' && (
+        <HomeView
+          tracks={allKnownTracks}
+          currentUser={currentUser}
+          favoriteIds={favoriteIds}
+          downloadedTrackIds={downloadedTrackIds}
+          playCounts={listeningStats.trackPlayCounts}
+          artistPlayCounts={listeningStats.artistPlayCounts}
+          playlists={playlists}
+          recentLog={listeningStats.recentLog}
+          followedArtists={followedArtists}
+          topFilter={topFilter}
+          onFilterChange={handleFilterChange}
+          activeTrackId={activeTrack?.id ?? ''}
+          isPlaying={isPlaying}
+          isOnline={isOnline}
+          offlineMode={Boolean(preferences.offlineMode)}
+          audioQuality={audioStatusLabel}
+          onPlayTrack={handlePlayTrack}
+          onTogglePlay={handleTogglePlay}
+          onOpenPlayer={() => setIsPlayerOpen(true)}
+          onOpenSettings={() => {
+            setSettingsInitialSubPage(null);
+            setIsSettingsOpen(true);
+          }}
+          onOpenArtist={setSelectedArtistName}
+          onOpenShow={setSelectedShow}
+          onOpenCollection={setSelectedCollection}
+          onShowsLoaded={setShows}
+          onRegisterTracks={handleRegisterDiscoveredTracks}
+        />
+      )}
+
+      {activeNav === 'Activity' && (
+        <ActivityView
+          tracks={allKnownTracks}
+          currentUser={currentUser}
+          listeningStats={listeningStats}
+          recentLog={listeningStats.recentLog}
+          favoriteIds={favoriteIds}
+          downloadedTrackIds={downloadedTrackIds}
+          activeTrackId={activeTrack?.id ?? ''}
+          activeTrack={effectiveTrack}
+          isPlaying={isPlaying}
+          socialUsers={socialUsers}
+          partyMessages={partyMessages}
+          activePartyFriend={activePartyFriend}
+          onPlayTrack={handlePlayTrack}
+          onTogglePlay={handleTogglePlay}
+          onOpenPlayer={() => setIsPlayerOpen(true)}
+          onOpenArtist={setSelectedArtistName}
+          onOpenAddToPlaylist={setPlaylistModalTrack}
+          onToggleFriend={handleToggleFriend}
+          onAddCustomFriend={handleAddCustomFriend}
+          onReactToFriend={handleReactToFriend}
+          onRequestListenPartyPopup={handleRequestListenPartyPopup}
+          onRequestBlendPopup={handleRequestBlendPopup}
+          onEndListenParty={() => {
+            setActivePartyFriendId(null);
+            showToast('Left Listen Party');
+          }}
+          onSwitchPartyTrack={handleSwitchPartyTrack}
+          onSendPartyMessage={handleSendPartyMessage}
+          onSaveBlendPlaylist={handleSaveBlendPlaylist}
+          onSubPageChange={scrollMainToTop}
+        />
+      )}
+
+      {activeNav === 'Search' && (
+        <SearchView
+          tracks={allKnownTracks}
+          activeTrackId={activeTrack?.id ?? ''}
+          isPlaying={isPlaying}
+          isOnline={isOnline}
+          offlineMode={Boolean(preferences.offlineMode)}
+          downloadedTrackIds={downloadedTrackIds}
+          recentSearches={recentSearches}
+          onAddRecentSearch={handleAddRecentSearch}
+          onRemoveRecentSearch={handleRemoveRecentSearch}
+          onClearRecentSearches={handleClearRecentSearches}
+          onPlayTrack={handlePlayTrack}
+          onTogglePlay={handleTogglePlay}
+          onOpenPlayer={() => setIsPlayerOpen(true)}
+          onOpenArtist={setSelectedArtistName}
+          onOpenShow={setSelectedShow}
+          onOpenCollection={setSelectedCollection}
+          onOpenAddToPlaylist={setPlaylistModalTrack}
+          onToggleDownload={handleToggleDownload}
+          onRegisterTracks={handleRegisterDiscoveredTracks}
+        />
+      )}
+
+      {activeNav === 'Library' && (
+        <LibraryView
+          tracks={allKnownTracks}
+          playlists={playlists}
+          shows={shows}
+          showProgress={showProgress}
+          likedSongsCustomization={likedSongsCustomization}
+          activeTrackId={activeTrack?.id ?? ''}
+          isPlaying={isPlaying}
+          favoriteIds={favoriteIds}
+          followedArtists={followedArtists}
+          downloadedTrackIds={downloadedTrackIds}
+          onPlayTrack={handlePlayTrack}
+          onTogglePlay={handleTogglePlay}
+          onOpenPlayer={() => setIsPlayerOpen(true)}
+          onToggleFavorite={handleToggleFavorite}
+          onToggleDownload={handleToggleDownload}
+          onDownloadTracks={handleDownloadTracks}
+          onClearDownloads={handleClearDownloads}
+          onOpenArtist={setSelectedArtistName}
+          onOpenShow={setSelectedShow}
+          onOpenAddToPlaylist={setPlaylistModalTrack}
+          onOpenCreatePlaylist={() => setIsCreatePlaylistOpen(true)}
+          onOpenQueue={() => setIsLibraryQueueOpen(true)}
+          onTogglePinPlaylist={handleTogglePinPlaylist}
+          onTogglePinLikedSongs={handleTogglePinLikedSongs}
+          onUpdatePlaylist={handleUpdatePlaylist}
+          onUpdateLikedSongsCustomization={handleUpdateLikedSongsCustomization}
+          onToggleTrackInPlaylist={handleToggleTrackInPlaylist}
+        />
+      )}
+    </>
+  );
 
   return (
     <div className="relative h-[100dvh] w-full overflow-hidden bg-[#000000] text-white">
@@ -1946,152 +2625,113 @@ export default function App() {
         }}
       />
 
-      {/* Unified Upper Floating Pill Bar */}
-      <TopBar
-        activeFilter={topFilter}
-        onFilterChange={handleFilterChange}
-        onOpenProfile={() => setIsSettingsOpen(true)}
-        isProfileOpen={isSettingsOpen}
-        userName={currentUser.name}
-        userInitials={currentUser.initials}
-        userAvatarUrl={currentUser.avatarUrl}
-        userAvatarStyle={currentUser.avatarStyle}
-        userAccentColor={currentUser.accentColor}
-      />
+      {isDesktop && !isReelsCanvas ? (
+        <DesktopWorkspace
+          currentUser={currentUser}
+          activeNav={activeNav}
+          onNavChange={handleNavChange}
+          playlists={playlists}
+          tracks={allKnownTracks}
+          queue={queue}
+          activeTrack={effectiveTrack}
+          isPlaying={isPlaying}
+          currentTime={currentTime}
+          shuffleMode={shuffleMode}
+          repeatMode={repeatMode}
+          autoScrollLyrics={preferences.autoScrollLyrics}
+          isFavorite={Boolean(activeTrack && favoriteIds.has(activeTrack.id))}
+          isDownloaded={Boolean(activeTrack && downloadedTrackIds.has(activeTrack.id))}
+          activeDeviceId={activeDeviceId}
+          isOnline={isOnline}
+          showOnlineRestoredBanner={showOnlineRestoredBanner}
+          mainScrollRef={mainScrollRef}
+          onOpenProfile={() => {
+            setSettingsInitialSubPage(null);
+            setIsSettingsOpen(true);
+          }}
+          onOpenCreatePlaylist={() => setIsCreatePlaylistOpen(true)}
+          onPlayTrack={handlePlayTrack}
+          onTogglePlay={handleTogglePlay}
+          onPrevTrack={goToPrevTrack}
+          onNextTrack={goToNextTrack}
+          onSeek={handleSeek}
+          onCycleShuffle={handleCycleShuffle}
+          onCycleRepeat={handleCycleRepeat}
+          onToggleFavorite={handleToggleFavorite}
+          onToggleDownload={handleToggleDownload}
+          onOpenAddToPlaylist={setPlaylistModalTrack}
+          onOpenArtist={setSelectedArtistName}
+          onOpenFullPlayer={() => setIsPlayerOpen(true)}
+          onSelectDevice={handleSelectDevice}
+        >
+          {activePageContent}
+        </DesktopWorkspace>
+      ) : (
+        <>
+          {/* Unified Upper Floating Pill Bar */}
+          <TopBar
+            hidden={isReelsCanvas}
+            onOpenProfile={() => {
+              setSettingsInitialSubPage(null);
+              setIsSettingsOpen(true);
+            }}
+            isProfileOpen={isSettingsOpen}
+            userName={currentUser.name}
+            userInitials={currentUser.initials}
+            userAvatarUrl={currentUser.avatarUrl}
+            userAvatarStyle={currentUser.avatarStyle}
+            userAccentColor={currentUser.accentColor}
+          />
 
-      {/* Main Responsive Scroll Canvas */}
-      <main
-        ref={mainScrollRef}
-        className="glass-scroll relative z-10 h-full w-full overflow-y-auto scroll-pt-24 scroll-pb-52"
-      >
-        <div className="mx-auto w-full max-w-[1120px] px-4 sm:px-6 lg:px-8 pt-[calc(5.25rem+env(safe-area-inset-top))] sm:pt-24 pb-[calc(12.5rem+env(safe-area-inset-bottom))] sm:pb-48">
-          {selectedArtistName ? (
-            <ArtistProfileView
-              artistName={selectedArtistName}
-              tracks={allKnownTracks}
-              activeTrackId={activeTrack?.id ?? ''}
-              isPlaying={isPlaying}
-              isFollowing={followedArtists.has(selectedArtistName)}
-              favoriteIds={favoriteIds}
-              downloadedTrackIds={downloadedTrackIds}
-              onBack={() => setSelectedArtistName(null)}
-              onToggleFollow={handleToggleFollow}
-              onPlayTrack={handlePlayTrack}
-              onTogglePlay={handleTogglePlay}
-              onOpenPlayer={() => setIsPlayerOpen(true)}
-              onToggleFavorite={handleToggleFavorite}
-              onToggleDownload={handleToggleDownload}
-              onOpenAddToPlaylist={setPlaylistModalTrack}
-              onRegisterTracks={handleRegisterDiscoveredTracks}
-            />
-          ) : (
-            <>
-              {activeNav === 'Home' && (
-                <HomeView
-                  tracks={allKnownTracks}
-                  currentUser={currentUser}
-                  favoriteIds={favoriteIds}
-                  playCounts={listeningStats.trackPlayCounts}
-                  artistPlayCounts={listeningStats.artistPlayCounts}
-                  playlists={playlists}
-                  recentLog={listeningStats.recentLog}
-                  followedArtists={followedArtists}
-                  topFilter={topFilter}
-                  activeTrackId={activeTrack?.id ?? ''}
-                  isPlaying={isPlaying}
-                  audioQuality={audioStatusLabel}
-                  onPlayTrack={handlePlayTrack}
-                  onTogglePlay={handleTogglePlay}
-                  onOpenPlayer={() => setIsPlayerOpen(true)}
-                  onOpenSettings={() => setIsSettingsOpen(true)}
-                  onOpenArtist={setSelectedArtistName}
-                  onOpenAddToPlaylist={setPlaylistModalTrack}
-                  onRegisterTracks={handleRegisterDiscoveredTracks}
-                />
-              )}
+          {/* Main Responsive Scroll Canvas */}
+          <main
+            ref={mainScrollRef}
+            className={
+              isReelsCanvas
+                ? 'relative z-10 h-full w-full overflow-hidden'
+                : 'glass-scroll relative z-10 h-full w-full overflow-y-auto scroll-pt-24 scroll-pb-52'
+            }
+          >
+            {isReelsCanvas ? (
+              <ReelsView
+                tracks={allKnownTracks}
+                currentUser={currentUser}
+                isActive={isReelsCanvas}
+                isOnline={isOnline}
+                offlineMode={Boolean(preferences.offlineMode)}
+                onOpenArtist={setSelectedArtistName}
+                onOpenAddToPlaylist={setPlaylistModalTrack}
+                onRegisterTracks={handleRegisterDiscoveredTracks}
+              />
+            ) : (
+              <div className="mx-auto w-full max-w-[1120px] px-4 sm:px-6 lg:px-8 pt-[calc(5.25rem+env(safe-area-inset-top))] sm:pt-24 pb-[calc(12.5rem+env(safe-area-inset-bottom))] sm:pb-48">
+                {activePageContent}
+              </div>
+            )}
+          </main>
 
-              {activeNav === 'Activity' && (
-                <ActivityView
-                  tracks={allKnownTracks}
-                  currentUser={currentUser}
-                  listeningStats={listeningStats}
-                  recentLog={listeningStats.recentLog}
-                  favoriteIds={favoriteIds}
-                  activeTrackId={activeTrack?.id ?? ''}
-                  activeTrack={effectiveTrack}
-                  isPlaying={isPlaying}
-                  socialUsers={socialUsers}
-                  partyMessages={partyMessages}
-                  activePartyFriend={activePartyFriend}
-                  onPlayTrack={handlePlayTrack}
-                  onTogglePlay={handleTogglePlay}
-                  onOpenPlayer={() => setIsPlayerOpen(true)}
-                  onOpenArtist={setSelectedArtistName}
-                  onOpenAddToPlaylist={setPlaylistModalTrack}
-                  onToggleFriend={handleToggleFriend}
-                  onAddCustomFriend={handleAddCustomFriend}
-                  onReactToFriend={handleReactToFriend}
-                  onRequestListenPartyPopup={handleRequestListenPartyPopup}
-                  onRequestBlendPopup={handleRequestBlendPopup}
-                  onEndListenParty={() => {
-                    setActivePartyFriendId(null);
-                    showToast('Left Listen Party');
-                  }}
-                  onSwitchPartyTrack={handleSwitchPartyTrack}
-                  onSendPartyMessage={handleSendPartyMessage}
-                  onSaveBlendPlaylist={handleSaveBlendPlaylist}
-                  onSubPageChange={scrollMainToTop}
-                />
-              )}
-
-              {activeNav === 'Search' && (
-                <SearchView
-                  tracks={allKnownTracks}
-                  activeTrackId={activeTrack?.id ?? ''}
-                  isPlaying={isPlaying}
-                  downloadedTrackIds={downloadedTrackIds}
-                  onPlayTrack={handlePlayTrack}
-                  onTogglePlay={handleTogglePlay}
-                  onOpenPlayer={() => setIsPlayerOpen(true)}
-                  onOpenArtist={setSelectedArtistName}
-                  onOpenAddToPlaylist={setPlaylistModalTrack}
-                  onToggleDownload={handleToggleDownload}
-                  onRegisterTracks={handleRegisterDiscoveredTracks}
-                />
-              )}
-
-              {activeNav === 'Library' && (
-                <LibraryView
-                  tracks={allKnownTracks}
-                  playlists={playlists}
-                  likedSongsCustomization={likedSongsCustomization}
-                  activeTrackId={activeTrack?.id ?? ''}
-                  isPlaying={isPlaying}
-                  favoriteIds={favoriteIds}
-                  followedArtists={followedArtists}
-                  downloadedTrackIds={downloadedTrackIds}
-                  onPlayTrack={handlePlayTrack}
-                  onTogglePlay={handleTogglePlay}
-                  onOpenPlayer={() => setIsPlayerOpen(true)}
-                  onToggleFavorite={handleToggleFavorite}
-                  onToggleDownload={handleToggleDownload}
-                  onDownloadTracks={handleDownloadTracks}
-                  onClearDownloads={handleClearDownloads}
-                  onOpenArtist={setSelectedArtistName}
-                  onOpenAddToPlaylist={setPlaylistModalTrack}
-                  onOpenCreatePlaylist={() => setIsCreatePlaylistOpen(true)}
-                  onOpenQueue={() => setIsLibraryQueueOpen(true)}
-                  onTogglePinPlaylist={handleTogglePinPlaylist}
-                  onTogglePinLikedSongs={handleTogglePinLikedSongs}
-                  onUpdatePlaylist={handleUpdatePlaylist}
-                  onUpdateLikedSongsCustomization={handleUpdateLikedSongsCustomization}
-                  onToggleTrackInPlaylist={handleToggleTrackInPlaylist}
-                />
-              )}
-            </>
-          )}
-        </div>
-      </main>
+          {/* Bottom Floating Mini-Player + Nav Dock */}
+          <BottomDock
+            activeTrack={effectiveTrack}
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            activeNav={activeNav}
+            isOnline={isOnline}
+            showOnlineRestoredBanner={showOnlineRestoredBanner}
+            bluetoothState={bluetoothState}
+            connectedBluetoothDevice={connectedBluetoothDevice}
+            onNavChange={handleNavChange}
+            onTogglePlay={handleTogglePlay}
+            onNextTrack={goToNextTrack}
+            onOpenPlayer={() => setIsPlayerOpen(true)}
+            onDismissMiniPlayer={handleDismissMiniPlayer}
+            onOpenDevicesSettings={() => {
+              setSettingsInitialSubPage('devices');
+              setIsSettingsOpen(true);
+            }}
+          />
+        </>
+      )}
 
       {/* Action Feedback Pill */}
       {toastMessage && (
@@ -2102,18 +2742,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Floating Mini-Player + Nav Dock */}
-      <BottomDock
-        activeTrack={effectiveTrack}
-        isPlaying={isPlaying}
-        currentTime={currentTime}
-        activeNav={activeNav}
-        onNavChange={handleNavChange}
-        onTogglePlay={handleTogglePlay}
-        onNextTrack={goToNextTrack}
-        onOpenPlayer={() => setIsPlayerOpen(true)}
-      />
-
       {/* Full-Screen Music Player & Time-Synced Lyrics Overlay */}
       <FullScreenPlayer
         isOpen={isPlayerOpen}
@@ -2122,14 +2750,14 @@ export default function App() {
         allTracks={allKnownTracks}
         isPlaying={isPlaying}
         currentTime={currentTime}
-        isShuffled={isShuffled}
+        shuffleMode={shuffleMode}
         repeatMode={repeatMode}
+        playbackSpeed={preferences.playbackSpeed ?? 1}
         isFavorite={Boolean(activeTrack && favoriteIds.has(activeTrack.id))}
         isDownloaded={Boolean(activeTrack && downloadedTrackIds.has(activeTrack.id))}
         activeDeviceId={activeDeviceId}
         showLyrics={showLyrics}
         streamingQuality={preferences.streamingQuality}
-        spatialEnabled={preferences.spatialEnabled}
         autoScrollLyrics={preferences.autoScrollLyrics}
         onClose={() => {
           setIsPlayerOpen(false);
@@ -2138,9 +2766,11 @@ export default function App() {
         onToggleLyrics={setShowLyrics}
         onTogglePlay={handleTogglePlay}
         onSeek={handleSeek}
+        onSkipBy={handleSkipBy}
+        onChangePlaybackSpeed={handleChangePlaybackSpeed}
         onPrevTrack={goToPrevTrack}
         onNextTrack={goToNextTrack}
-        onToggleShuffle={() => setIsShuffled((s) => !s)}
+        onCycleShuffle={handleCycleShuffle}
         onCycleRepeat={handleCycleRepeat}
         onToggleFavorite={handleToggleFavorite}
         onToggleDownload={handleToggleDownload}
@@ -2152,6 +2782,40 @@ export default function App() {
         onAddToQueue={handleAddToQueue}
         onOpenAddToPlaylist={setPlaylistModalTrack}
         onOpenArtist={setSelectedArtistName}
+      />
+
+      {/* Album, Playlist & Radio Collection Detail Modal */}
+      <CollectionDetailModal
+        collection={selectedCollection}
+        activeTrackId={activeTrack?.id ?? ''}
+        isPlaying={isPlaying}
+        downloadedTrackIds={downloadedTrackIds}
+        isOnline={isOnline}
+        offlineMode={Boolean(preferences.offlineMode)}
+        onClose={() => setSelectedCollection(null)}
+        onPlayTrack={handlePlayTrack}
+        onTogglePlay={handleTogglePlay}
+        onToggleDownload={handleToggleDownload}
+        onAddToQueue={handleAddToQueue}
+        onOpenAddToPlaylist={setPlaylistModalTrack}
+        onOpenArtist={setSelectedArtistName}
+        onRegisterTracks={handleRegisterDiscoveredTracks}
+      />
+
+      {/* Podcast & Audiobook Show Detail Modal */}
+      <ShowDetailModal
+        show={selectedShow}
+        activeTrackId={activeTrack?.id ?? null}
+        isPlaying={isPlaying}
+        showProgress={showProgress}
+        downloadedTrackIds={downloadedTrackIds}
+        playbackSpeed={preferences.playbackSpeed ?? 1}
+        onChangePlaybackSpeed={handleChangePlaybackSpeed}
+        onSkipBy={handleSkipBy}
+        onClose={() => setSelectedShow(null)}
+        onPlayEpisode={handlePlayEpisode}
+        onTogglePlay={handleTogglePlay}
+        onToggleDownload={handleToggleDownload}
       />
 
       {/* Library-Accessible Queue Management Modal */}
@@ -2197,7 +2861,11 @@ export default function App() {
       {/* Full Liquid Glass Profile & Settings Page */}
       <ProfileSettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        initialSubPage={settingsInitialSubPage}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          setSettingsInitialSubPage(null);
+        }}
         currentUser={currentUser}
         onUpdateUser={handleUpdateUser}
         preferences={preferences}
@@ -2227,7 +2895,12 @@ export default function App() {
         activeDeviceId={activeDeviceId}
         onSelectDevice={handleSelectDevice}
         onOpenArtist={setSelectedArtistName}
-        onReplayOnboarding={() => setIsReplayOnboardingOpen(true)}
+        battery={battery}
+        accountDevices={accountDevices}
+        onTransferPlaybackToDevice={handleTransferPlaybackToDevice}
+        onConnectApp={handleConnectApp}
+        onDisconnectApp={handleDisconnectApp}
+        onRequestNotifications={handleRequestNotifications}
         tracks={allKnownTracks}
       />
     </div>

@@ -1,5 +1,5 @@
-const CACHE_NAME = 'klyn-shell-v2';
-const APP_SHELL = ['/', '/index.html', '/manifest.json', '/assets/aistudio/image_99ec12b8.png'];
+const CACHE_NAME = 'klyn-shell-v4';
+const APP_SHELL = ['/', '/index.html', '/manifest.json', '/klyn-logo.png', '/apple-touch-icon.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -27,6 +27,20 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) return client.focus();
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow('/');
+      }
+    }).catch(() => {})
+  );
+});
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
@@ -38,8 +52,9 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
 
-  // Network-first for HTML navigation so updates land cleanly
+  // Network-first for HTML navigation so updates land cleanly while offline falls back to cached shell
   if (request.mode === 'navigate') {
     event.respondWith(
       fetch(request)
@@ -60,7 +75,7 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Cache-first with safe network fallback for same-origin static assets
+  // Cache-first with safe network fallback for same-origin static assets & klyn-logo.png
   event.respondWith(
     caches
       .match(request)

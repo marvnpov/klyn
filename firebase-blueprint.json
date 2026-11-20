@@ -2,7 +2,7 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Authenticated listener profile, visual customization, preferences, liked/followed IDs, and bounded listening stats.",
+      "description": "Authenticated listener profile, connected streaming apps, preferences, liked/followed IDs, and bounded listening stats.",
       "type": "object",
       "properties": {
         "uid": { "type": "string", "description": "Firebase Auth UID" },
@@ -17,11 +17,15 @@
         "likedTrackIds": { "type": "array", "items": { "type": "string" } },
         "followedArtistIds": { "type": "array", "items": { "type": "string" } },
         "downloadedTrackIds": { "type": "array", "items": { "type": "string" } },
+        "recentSearches": { "type": "array", "items": { "type": "string" } },
         "activeDeviceId": { "type": "string" },
         "hasCompletedOnboarding": { "type": "boolean" },
-        "preferences": { "type": "object", "description": "Audio, playback, notifications, and privacy toggles" },
-        "likedSongsCustomization": { "type": "object", "description": "Custom metadata and style for Liked Songs" },
-        "listeningStats": { "type": "object", "description": "Aggregated listening minutes, play counts, and streak state" },
+        "notificationsEnabled": { "type": "boolean" },
+        "connectedApps": { "type": "object" },
+        "preferences": { "type": "object" },
+        "likedSongsCustomization": { "type": "object" },
+        "listeningStats": { "type": "object" },
+        "showProgress": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -29,7 +33,7 @@
     },
     "UserPlaylist": {
       "title": "UserPlaylist",
-      "description": "User-created or Klyn AI Blend playlist owned by a single listener.",
+      "description": "User-created, imported, or Klyn AI Blend playlist owned by a single listener.",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
@@ -47,6 +51,7 @@
         "isAiBlend": { "type": "boolean" },
         "blendMatchPct": { "type": "number" },
         "sharedWithFriendId": { "type": "string" },
+        "sourceProvider": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -66,8 +71,8 @@
         "primaryColor": { "type": "string" },
         "secondaryColor": { "type": "string" },
         "genre": { "type": "string" },
-        "category": { "type": "string", "enum": ["Music", "Spatial", "Mixes"] },
-        "quality": { "type": "string", "enum": ["Dolby Atmos", "Hi-Res Lossless", "Lossless"] },
+        "category": { "type": "string", "enum": ["Music", "Mixes"] },
+        "quality": { "type": "string", "enum": ["Hi-Res Lossless", "Lossless"] },
         "coverUrl": { "type": "string" },
         "fallbackGradient": { "type": "string" },
         "playlistName": { "type": "string" },
@@ -76,6 +81,29 @@
         "downloadedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "ownerId", "title", "artist", "album", "duration", "downloadedAt"]
+    },
+    "UserDevice": {
+      "title": "UserDevice",
+      "description": "Active device session and battery telemetry for cross-device handoff and power monitoring.",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "name": { "type": "string" },
+        "platform": { "type": "string" },
+        "isPlaying": { "type": "boolean" },
+        "activeTrackId": { "type": "string" },
+        "activeTrackTitle": { "type": "string" },
+        "activeTrackArtist": { "type": "string" },
+        "playbackPosition": { "type": "number" },
+        "batteryLevel": { "type": "number" },
+        "batteryCharging": { "type": "boolean" },
+        "bluetoothDeviceName": { "type": "string" },
+        "bluetoothBatteryLevel": { "type": "number" },
+        "lastSeen": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["deviceId", "ownerId", "name", "isPlaying", "lastSeen", "updatedAt"]
     },
     "UserFriend": {
       "title": "UserFriend",
@@ -96,24 +124,92 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "ownerId", "name", "handle", "initials", "isFriend", "createdAt", "updatedAt"]
+    },
+    "PublicProfile": {
+      "title": "PublicProfile",
+      "description": "Discoverable listener profile card by handle/uid for social friend discovery.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "handle": { "type": "string" },
+        "initials": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "accentColor": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "handle", "initials", "updatedAt"]
+    },
+    "FriendRequest": {
+      "title": "FriendRequest",
+      "description": "Real user friend, Blend, or Listen Party request between authenticated KLYN listeners.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fromUid": { "type": "string" },
+        "fromName": { "type": "string" },
+        "fromHandle": { "type": "string" },
+        "toUid": { "type": "string" },
+        "kind": { "type": "string", "enum": ["friend", "blend", "listen-party"] },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "trackId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "fromUid", "fromName", "fromHandle", "toUid", "kind", "status", "createdAt", "updatedAt"]
+    },
+    "ListenParty": {
+      "title": "ListenParty",
+      "description": "Synced Listen Party playback session shared between two authenticated KLYN listeners.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "hostUid": { "type": "string" },
+        "guestUid": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "ended"] },
+        "activeTrackId": { "type": "string" },
+        "activeTrackTitle": { "type": "string" },
+        "activeTrackArtist": { "type": "string" },
+        "isPlaying": { "type": "boolean" },
+        "messages": { "type": "array", "items": { "type": "object" } },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "hostUid", "guestUid", "status", "isPlaying", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Listener profile, customization, settings, and library indices."
+      "description": "Listener profile, customization, settings, connected apps, and library indices."
     },
     "/users/{userId}/playlists/{playlistId}": {
       "schema": { "$ref": "#/entities/UserPlaylist" },
-      "description": "Listener's personal and AI Blend playlists."
+      "description": "Listener's personal, imported, and AI Blend playlists."
     },
     "/users/{userId}/downloads/{trackId}": {
       "schema": { "$ref": "#/entities/DownloadedTrack" },
       "description": "Offline App Downloads synchronized for the listener."
     },
+    "/users/{userId}/devices/{deviceId}": {
+      "schema": { "$ref": "#/entities/UserDevice" },
+      "description": "Connected device playback handoff and live battery status records."
+    },
     "/users/{userId}/friends/{friendId}": {
       "schema": { "$ref": "#/entities/UserFriend" },
       "description": "Listener's saved social friends for Listen Party and Blend."
+    },
+    "/public_profiles/{userId}": {
+      "schema": { "$ref": "#/entities/PublicProfile" },
+      "description": "Public handle lookup card for friend search and requests."
+    },
+    "/friend_requests/{requestId}": {
+      "schema": { "$ref": "#/entities/FriendRequest" },
+      "description": "Peer-to-peer friend, Blend, and Listen Party requests."
+    },
+    "/listen_parties/{partyId}": {
+      "schema": { "$ref": "#/entities/ListenParty" },
+      "description": "Synced Listen Party sessions between two listeners."
     }
   }
 }

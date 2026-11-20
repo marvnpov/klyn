@@ -108,7 +108,7 @@ export const CreatePlaylistModal: React.FC<CreatePlaylistModalProps> = ({
                 type="text"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Late-night spatial & lossless favorites"
+                placeholder="Late-night lossless favorites"
                 className="w-full rounded-2xl bg-white/[0.06] border border-white/15 px-4 py-2.5 text-sm text-white placeholder:text-white/35 focus:border-white/35 focus:outline-none"
               />
             </div>

@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   ArrowDownToLine,
   ArrowLeft,
+  Battery,
+  BatteryCharging,
   Bell,
   BellRing,
   Bluetooth,
@@ -10,9 +12,9 @@ import {
   ChevronRight,
   Cloud,
   Disc3,
-  Flame,
   Headphones,
   Laptop,
+  Link2,
   Loader2,
   Lock,
   LogOut,
@@ -20,7 +22,6 @@ import {
   Pencil,
   Play,
   RefreshCw,
-  RotateCcw,
   Shield,
   Sliders,
   Smartphone,
@@ -28,6 +29,7 @@ import {
   Trash2,
   User,
   Users,
+  WifiOff,
   X,
 } from 'lucide-react';
 import { formatTime } from '../data/catalog';
@@ -35,7 +37,10 @@ import { useAudioDevices } from '../hooks/useAudioDevices';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { getOfflineStorageStats, OfflineStorageStats } from '../services/offlineCache';
 import {
+  AccountDeviceRecord,
   AvatarStyle,
+  BatterySnapshot,
+  ConnectedAppProvider,
   CrossfadeDuration,
   DownloadQuality,
   StreamingQuality,
@@ -44,12 +49,25 @@ import {
   UserPreferences,
 } from '../types/music';
 import { compressAvatarFile, computeInitials } from '../utils/avatarImage';
-import { BrandLogo } from './BrandLogo';
+import { getNotificationPermissionState } from '../utils/notifications';
 import { CoverArt } from './CoverArt';
+import { KlynLogo } from './KlynLogo';
 import { UserAvatar } from './UserAvatar';
+
+export type SettingsSubPageId =
+  | null
+  | 'edit-profile'
+  | 'downloads'
+  | 'account'
+  | 'notifications'
+  | 'privacy'
+  | 'playback'
+  | 'devices'
+  | 'quality';
 
 interface ProfileSettingsModalProps {
   isOpen: boolean;
+  initialSubPage?: SettingsSubPageId;
   onClose: () => void;
   currentUser: UserAccount;
   onUpdateUser: (updatedUser: UserAccount) => void;
@@ -69,20 +87,14 @@ interface ProfileSettingsModalProps {
   activeDeviceId: string;
   onSelectDevice: (deviceId: string) => void;
   onOpenArtist: (artistName: string) => void;
-  onReplayOnboarding: () => void;
+  battery: BatterySnapshot;
+  accountDevices: AccountDeviceRecord[];
+  onTransferPlaybackToDevice: (device: AccountDeviceRecord) => void;
+  onConnectApp: (provider: ConnectedAppProvider, handleOrUrl: string) => Promise<void>;
+  onDisconnectApp: (provider: ConnectedAppProvider) => void;
+  onRequestNotifications: () => Promise<void>;
   tracks?: Track[];
 }
-
-type SettingsSubPageId =
-  | null
-  | 'edit-profile'
-  | 'downloads'
-  | 'account'
-  | 'notifications'
-  | 'privacy'
-  | 'playback'
-  | 'devices'
-  | 'quality';
 
 const SUBPAGE_TITLES: Record<Exclude<SettingsSubPageId, null>, string> = {
   'edit-profile': 'Edit Profile',
@@ -95,15 +107,49 @@ const SUBPAGE_TITLES: Record<Exclude<SettingsSubPageId, null>, string> = {
   quality: 'Media Quality',
 };
 
+const MUSIC_APP_PROVIDERS: Array<{
+  provider: ConnectedAppProvider;
+  label: string;
+  placeholder: string;
+  accent: string;
+}> = [
+  {
+    provider: 'spotify',
+    label: 'Spotify',
+    placeholder: 'Username or Spotify playlist URL',
+    accent: '#1DB954',
+  },
+  {
+    provider: 'audiomack',
+    label: 'Audiomack',
+    placeholder: '@handle or Audiomack link',
+    accent: '#FFA200',
+  },
+  {
+    provider: 'soundcloud',
+    label: 'SoundCloud',
+    placeholder: 'Username or SoundCloud URL',
+    accent: '#FF5500',
+  },
+  {
+    provider: 'tunesimo',
+    label: 'Tunesimo',
+    placeholder: '@handle or Tunesimo library link',
+    accent: '#6366F1',
+  },
+];
+
+const PLAYBACK_SPEEDS = [1, 1.25, 1.5, 2];
+
 const GENRE_OPTIONS = [
+  'Trap',
+  'R&B',
+  'Hip-Hop',
+  'Pop',
+  'Afrobeats',
   'Electronic',
-  'Spatial',
-  'Alt-R&B',
-  'Lo-Fi',
-  'Ambient',
-  'Neo-Soul',
-  'House',
-  'Indie',
+  'Alternative',
+  'Soul',
 ];
 
 const AVATAR_STYLES: Array<{ id: AvatarStyle; label: string }> = [
@@ -148,6 +194,7 @@ const GlassToggle: React.FC<{
 
 export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
   isOpen,
+  initialSubPage = null,
   onClose,
   currentUser,
   onUpdateUser,
@@ -167,16 +214,24 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
   activeDeviceId,
   onSelectDevice,
   onOpenArtist,
-  onReplayOnboarding,
+  battery,
+  accountDevices,
+  onTransferPlaybackToDevice,
+  onConnectApp,
+  onDisconnectApp,
+  onRequestNotifications,
   tracks = [],
 }) => {
-  const [activeSubPage, setActiveSubPage] = useState<SettingsSubPageId>(null);
+  const [activeSubPage, setActiveSubPage] = useState<SettingsSubPageId>(initialSubPage);
   const [historyClearedNotice, setHistoryClearedNotice] = useState(false);
-  const [linkedApps, setLinkedApps] = useState({
-    instagramStories: true,
-    lastFm: false,
-    sonosConnect: true,
+  const [appInputs, setAppInputs] = useState<Record<ConnectedAppProvider, string>>({
+    spotify: '',
+    audiomack: '',
+    soundcloud: '',
+    tunesimo: '',
   });
+  const [syncingProvider, setSyncingProvider] = useState<ConnectedAppProvider | null>(null);
+  const [notificationPerm, setNotificationPerm] = useState(() => getNotificationPermissionState());
 
   // Editable Profile Draft State
   const [draftName, setDraftName] = useState(currentUser.name);
@@ -201,6 +256,15 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
     refreshAudioOutputs,
     removeBluetoothDevice,
   } = useAudioDevices();
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveSubPage(initialSubPage ?? null);
+      setNotificationPerm(getNotificationPermissionState());
+    } else {
+      setActiveSubPage(null);
+    }
+  }, [isOpen, initialSubPage]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -245,6 +309,16 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
       window.setTimeout(() => setInstallLabel(null), 2600);
     } else {
       setInstallLabel(null);
+    }
+  };
+
+  const handleConnectProvider = async (provider: ConnectedAppProvider) => {
+    setSyncingProvider(provider);
+    try {
+      await onConnectApp(provider, appInputs[provider] || currentUser.handle);
+      setAppInputs((prev) => ({ ...prev, [provider]: '' }));
+    } finally {
+      setSyncingProvider(null);
     }
   };
 
@@ -299,10 +373,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
     setActiveSubPage(null);
   };
 
-  const listenerBadge = [
-    preferences.streamingQuality,
-    preferences.spatialEnabled ? 'Spatial Audio' : 'Stereo',
-  ].join(' · ');
+  const listenerBadge = `${preferences.streamingQuality} · Hi-Res`;
 
   const followedList = Array.from(followedArtists);
   const artistCoverMap = new Map<string, string>();
@@ -353,9 +424,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
         {
           id: 'quality' as const,
           title: 'Media Quality',
-          subtitle: `${preferences.streamingQuality} streaming · ${
-            preferences.spatialEnabled ? 'Dolby Atmos' : 'Stereo'
-          }`,
+          subtitle: `${preferences.streamingQuality} streaming · ${preferences.downloadQuality} downloads`,
           icon: Disc3,
         },
         {
@@ -500,7 +569,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
                           {currentUser.handle} · {currentUser.email}
                         </p>
                         <p className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-white/75">
-                          <BrandLogo className="h-4 w-4 rounded-[5px]" />
+                          <KlynLogo size={16} className="rounded-[5px]" />
                           <span>{listenerBadge}</span>
                           {currentUser.uid && (
                             <>
@@ -539,17 +608,6 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
                             <span>{installLabel ?? 'Install App'}</span>
                           </>
                         )}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handleCloseProfile();
-                          onReplayOnboarding();
-                        }}
-                        className="liquid-glass inline-flex min-h-[40px] items-center gap-1.5 rounded-full px-4 py-2 text-xs font-semibold text-white/90 hover:bg-white/14 transition-colors"
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        <span>Setup Guide</span>
                       </button>
                     </div>
                   </div>
@@ -621,7 +679,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
                 className="liquid-glass-elevated flex items-center justify-between gap-4 rounded-[28px] px-5 py-4"
               >
                 <div className="flex items-center gap-3.5 min-w-0">
-                  <BrandLogo className="h-11 w-11 shrink-0 rounded-2xl border border-white/15" />
+                  <KlynLogo size={44} className="shrink-0 rounded-2xl" />
                   <div className="min-w-0">
                     <p className="truncate text-sm sm:text-base font-semibold text-white">
                       Install klyn App
@@ -1043,17 +1101,6 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
                   type="button"
                   onClick={() => {
                     handleCloseProfile();
-                    onReplayOnboarding();
-                  }}
-                  className="flex flex-1 items-center justify-center gap-2 rounded-full bg-white/[0.08] border border-white/16 py-3 px-4 text-sm font-semibold text-white hover:bg-white/16 transition-colors"
-                >
-                  <RotateCcw className="h-4 w-4" />
-                  <span>Replay Setup</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleCloseProfile();
                     onSignOut();
                   }}
                   className="flex flex-1 items-center justify-center gap-2 rounded-full bg-white/12 border border-white/18 py-3 px-4 text-sm font-semibold text-white hover:bg-white/20 transition-colors"
@@ -1089,7 +1136,38 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
           {/* SUB-PAGE: NOTIFICATIONS */}
           {activeSubPage === 'notifications' && (
             <div className="liquid-glass rounded-[30px] p-5 sm:p-6 space-y-4">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center justify-between gap-3 rounded-2xl bg-white/[0.05] border border-white/10 px-4 py-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-white">Device Push Notifications</p>
+                  <p className="text-xs text-white/55">
+                    {notificationPerm === 'granted'
+                      ? 'Enabled for new artist releases & invites'
+                      : notificationPerm === 'denied'
+                        ? 'Blocked in browser site settings'
+                        : notificationPerm === 'unsupported'
+                          ? 'Unavailable in this preview frame'
+                          : 'Allow real-time KLYN desktop & mobile alerts'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={notificationPerm === 'granted' || notificationPerm === 'unsupported'}
+                  onClick={() => {
+                    void onRequestNotifications().then(() => {
+                      setNotificationPerm(getNotificationPermissionState());
+                    });
+                  }}
+                  className={`shrink-0 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-all ${
+                    notificationPerm === 'granted'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30'
+                      : 'bg-white text-black hover:scale-[1.02] disabled:opacity-50'
+                  }`}
+                >
+                  {notificationPerm === 'granted' ? 'Enabled' : 'Enable Alerts'}
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
                 <div>
                   <p className="text-sm font-medium text-white">
                     New Releases from Followed Artists
@@ -1126,25 +1204,6 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
               </div>
 
               <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
-                <div className="flex items-center gap-2">
-                  <Flame className="h-4 w-4 text-white/60 shrink-0" />
-                  <div>
-                    <p className="text-sm font-medium text-white">Listening Streak Notifications</p>
-                    <p className="text-xs text-white/55">
-                      Daily reminders to keep your listening streak active
-                    </p>
-                  </div>
-                </div>
-                <GlassToggle
-                  checked={preferences.notifyStreakAlerts}
-                  onToggle={() =>
-                    onUpdatePreferences({ notifyStreakAlerts: !preferences.notifyStreakAlerts })
-                  }
-                  label="Listening Streak Notifications"
-                />
-              </div>
-
-              <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
                 <div>
                   <p className="text-sm font-medium text-white">Klyn Wrapped &amp; Weekly Activity</p>
                   <p className="text-xs text-white/55">Weekly listening summary &amp; top artist recaps</p>
@@ -1161,7 +1220,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
               <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
                 <div>
                   <p className="text-sm font-medium text-white">Playlist &amp; Library Updates</p>
-                  <p className="text-xs text-white/55">Curated mix refreshes &amp; Spatial Audio upgrades</p>
+                  <p className="text-xs text-white/55">Curated mix refreshes &amp; Lossless upgrades</p>
                 </div>
                 <GlassToggle
                   checked={preferences.notifyPlaylistUpdates}
@@ -1350,139 +1409,399 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
                   label="Auto-Scroll Synced Lyrics"
                 />
               </div>
+
+              <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
+                <div className="flex items-center gap-2.5">
+                  <WifiOff className="h-4 w-4 text-white/65 shrink-0" />
+                  <div>
+                    <p className="text-sm font-medium text-white">Offline Mode</p>
+                    <p className="text-xs text-white/55">
+                      Only allow playback of downloaded tracks saved offline
+                    </p>
+                  </div>
+                </div>
+                <GlassToggle
+                  checked={Boolean(preferences.offlineMode)}
+                  onToggle={() =>
+                    onUpdatePreferences({ offlineMode: !preferences.offlineMode })
+                  }
+                  label="Offline Mode"
+                />
+              </div>
+
+              <div className="border-t border-white/10 pt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-white">
+                      Podcast &amp; Audiobook Speed
+                    </p>
+                    <p className="text-xs text-white/55">Default playback rate for spoken shows</p>
+                  </div>
+                  <span className="text-xs font-semibold text-white tabular-nums">
+                    {preferences.playbackSpeed ?? 1}x
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-4 gap-2">
+                  {PLAYBACK_SPEEDS.map((spd) => {
+                    const selected = (preferences.playbackSpeed ?? 1) === spd;
+                    return (
+                      <button
+                        key={spd}
+                        type="button"
+                        onClick={() => onUpdatePreferences({ playbackSpeed: spd })}
+                        className={`rounded-full py-2 text-xs font-semibold transition-colors tabular-nums ${
+                          selected
+                            ? 'bg-white text-black'
+                            : 'bg-white/[0.06] text-white/75 hover:bg-white/14'
+                        }`}
+                      >
+                        {spd}x
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="border-t border-white/10 pt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-white">Display Layout</p>
+                    <p className="text-xs text-white/55">
+                      Adaptive computer sidebar workspace vs. floating mobile dock
+                    </p>
+                  </div>
+                  <span className="text-xs font-semibold capitalize text-white">
+                    {preferences.layoutMode ?? 'auto'}
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'auto', label: 'Auto' },
+                      { id: 'desktop', label: 'Computer' },
+                      { id: 'mobile', label: 'Mobile' },
+                    ] as const
+                  ).map((opt) => {
+                    const selected = (preferences.layoutMode ?? 'auto') === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => onUpdatePreferences({ layoutMode: opt.id })}
+                        className={`rounded-full py-2 text-xs font-semibold transition-colors ${
+                          selected
+                            ? 'bg-white text-black'
+                            : 'bg-white/[0.06] text-white/75 hover:bg-white/14'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
 
           {/* SUB-PAGE: APPS AND DEVICES */}
           {activeSubPage === 'devices' && (
-            <div className="liquid-glass rounded-[30px] p-5 sm:p-6 space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="space-y-5">
+              {/* 1. This Device Live Battery */}
+              <div className="liquid-glass rounded-[30px] p-5 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white/[0.08] border border-white/12">
+                    {battery.charging ? (
+                      <BatteryCharging className="h-5 w-5 text-emerald-400" />
+                    ) : (
+                      <Battery className="h-5 w-5 text-white/85" />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-white/50">
+                      This Device Live Battery
+                    </p>
+                    <p className="font-display text-lg font-bold text-white tabular-nums">
+                      {battery.supported && typeof battery.level === 'number'
+                        ? `${battery.level}%${battery.charging ? ' · Charging' : ' · On Battery'}`
+                        : 'Battery telemetry unavailable'}
+                    </p>
+                  </div>
+                </div>
+                {battery.supported && typeof battery.level === 'number' && (
+                  <div className="h-2.5 w-24 shrink-0 overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className={`h-full rounded-full ${
+                        battery.charging
+                          ? 'bg-emerald-400'
+                          : battery.level <= 20
+                            ? 'bg-rose-400'
+                            : 'bg-white'
+                      }`}
+                      style={{ width: `${battery.level}%` }}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Connected Music Apps (Spotify, Audiomack, SoundCloud, Tunesimo) */}
+              <div className="liquid-glass rounded-[30px] p-5 sm:p-6 space-y-4">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-white/55">
-                    Audio Output &amp; Bluetooth
+                    Connected Music Apps
                   </p>
-                  <p className="text-xs text-white/45 mt-0.5">
-                    Real system outputs &amp; nearby Bluetooth devices
+                  <p className="text-xs text-white/50 mt-0.5">
+                    Link and import tracks from your other streaming accounts into your Library
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={isScanningBluetooth}
-                    onClick={() => {
-                      void scanBluetoothDevices().then((added) => {
-                        if (added) onSelectDevice(added.id);
-                      });
-                    }}
-                    className="inline-flex min-h-[38px] items-center gap-1.5 rounded-full bg-white px-4 py-2 text-xs font-semibold text-black hover:scale-[1.02] active:scale-95 transition-transform disabled:opacity-70"
-                  >
-                    {isScanningBluetooth ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Bluetooth className="h-3.5 w-3.5" />
-                    )}
-                    <span>{isScanningBluetooth ? 'Scanning...' : 'Scan Bluetooth'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void refreshAudioOutputs()}
-                    aria-label="Refresh connected outputs"
-                    className="liquid-glass inline-flex h-[38px] w-[38px] items-center justify-center rounded-full text-white/85 hover:bg-white/14 transition-colors"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </button>
+
+                <div className="space-y-2.5">
+                  {MUSIC_APP_PROVIDERS.map(({ provider, label, placeholder, accent: appAccent }) => {
+                    const entry = currentUser.connectedApps?.[provider];
+                    const isConnected = Boolean(entry?.connected);
+                    const isBusy = syncingProvider === provider;
+
+                    return (
+                      <div
+                        key={provider}
+                        className="rounded-2xl bg-white/[0.04] border border-white/10 px-3.5 py-2.5 space-y-2"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span
+                              className="h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: appAccent }}
+                            />
+                            <div className="flex items-baseline gap-2 min-w-0">
+                              <p className="text-sm font-semibold text-white shrink-0">{label}</p>
+                              {isConnected && (
+                                <p className="truncate text-[11px] text-white/55">
+                                  {entry?.handleOrId || 'Connected'}
+                                  {typeof entry?.importedCount === 'number'
+                                    ? ` · ${entry.importedCount} tracks`
+                                    : ''}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+
+                          {isConnected ? (
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => void handleConnectProvider(provider)}
+                                className="rounded-full bg-white/12 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-white/20 transition-colors disabled:opacity-60"
+                              >
+                                {isBusy ? 'Syncing...' : 'Re-Sync'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onDisconnectApp(provider)}
+                                className="rounded-full bg-white/[0.06] px-3 py-1.5 text-[11px] font-semibold text-white/70 hover:bg-white/14 hover:text-white transition-colors"
+                              >
+                                Disconnect
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 w-full sm:w-auto sm:min-w-[260px]">
+                              <input
+                                type="text"
+                                value={appInputs[provider]}
+                                onChange={(e) =>
+                                  setAppInputs((prev) => ({ ...prev, [provider]: e.target.value }))
+                                }
+                                placeholder={placeholder}
+                                className="min-w-0 flex-1 rounded-full bg-white/[0.07] border border-white/12 px-3 py-1.5 text-xs text-white placeholder:text-white/35 focus:border-white/35 focus:outline-none"
+                              />
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => void handleConnectProvider(provider)}
+                                className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-[11px] font-semibold text-black hover:scale-[1.02] active:scale-95 transition-transform disabled:opacity-60"
+                              >
+                                {isBusy ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Link2 className="h-3 w-3" />
+                                )}
+                                <span>{isBusy ? 'Syncing' : 'Connect'}</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {entry?.syncError && (
+                          <p className="text-[11px] text-amber-300/90">{entry.syncError}</p>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
-              {scanStatus && (
-                <p className="rounded-2xl bg-white/[0.06] border border-white/10 px-4 py-2.5 text-xs text-white/75">
-                  {scanStatus}
-                </p>
-              )}
+              {/* 3. Active Devices on Your Account (Cross-Device Handoff) */}
+              <div className="liquid-glass rounded-[30px] p-5 sm:p-6 space-y-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-white/55">
+                    Active Devices on Your Account
+                  </p>
+                  <p className="text-xs text-white/50 mt-0.5">
+                    Live Firebase sessions across your phones, tablets, and desktops
+                  </p>
+                </div>
 
-              <div className="space-y-2.5">
-                {audioDevices.map((device) => {
-                  const selected = device.id === activeDeviceId;
-                  const Icon =
-                    device.type === 'bluetooth'
-                      ? Bluetooth
-                      : device.type === 'headphones'
-                        ? Headphones
-                        : device.type === 'desktop'
-                          ? Laptop
-                          : device.type === 'phone'
-                            ? Smartphone
-                            : Speaker;
-                  return (
-                    <div
-                      key={device.id}
-                      className={`flex w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 transition-colors ${
-                        selected
-                          ? 'bg-white/14 border border-white/20'
-                          : 'bg-white/[0.04] border border-transparent hover:bg-white/10'
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => onSelectDevice(device.id)}
-                        className="flex flex-1 min-w-0 items-center gap-3 text-left"
+                {accountDevices.length === 0 ? (
+                  <p className="rounded-2xl bg-white/[0.04] px-4 py-3 text-xs text-white/55">
+                    Sign in with Firebase Cloud Sync to see your other active KLYN devices here.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {accountDevices.map((dev) => (
+                      <div
+                        key={dev.deviceId}
+                        className={`flex items-center justify-between gap-3 rounded-2xl px-4 py-3 ${
+                          dev.isCurrentDevice
+                            ? 'bg-white/14 border border-white/20'
+                            : 'bg-white/[0.04] border border-white/8'
+                        }`}
                       >
-                        <Icon className="h-4.5 w-4.5 shrink-0 text-white/85" />
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-white">{device.name}</p>
-                          <p className="truncate text-xs text-white/55">{device.detail}</p>
+                        <div className="flex items-center gap-3 min-w-0">
+                          {dev.platform === 'iOS' || dev.platform === 'Android' ? (
+                            <Smartphone className="h-4.5 w-4.5 shrink-0 text-white/85" />
+                          ) : (
+                            <Laptop className="h-4.5 w-4.5 shrink-0 text-white/85" />
+                          )}
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-white">
+                              {dev.name} {dev.isCurrentDevice ? '(This Device)' : ''}
+                            </p>
+                            <p className="truncate text-xs text-white/55">
+                              {dev.activeTrackTitle
+                                ? `${dev.isPlaying ? 'Playing' : 'Paused'}: ${dev.activeTrackTitle}`
+                                : `${dev.platform} · Ready`}
+                              {typeof dev.batteryLevel === 'number'
+                                ? ` · ${dev.batteryLevel}% battery`
+                                : ''}
+                            </p>
+                          </div>
                         </div>
-                      </button>
-                      <div className="flex shrink-0 items-center gap-1.5">
-                        {selected && <Check className="h-4 w-4 text-white" />}
-                        {device.source === 'bluetooth' && (
+                        {!dev.isCurrentDevice && dev.activeTrackId && (
                           <button
                             type="button"
-                            onClick={() => {
-                              removeBluetoothDevice(device.id);
-                              if (selected) onSelectDevice('system-default');
-                            }}
-                            aria-label={`Remove ${device.name}`}
-                            className="flex h-8 w-8 items-center justify-center rounded-full text-white/50 hover:bg-white/12 hover:text-white transition-colors"
+                            onClick={() => onTransferPlaybackToDevice(dev)}
+                            className="shrink-0 rounded-full bg-white px-3 py-1.5 text-[11px] font-semibold text-black hover:scale-[1.03] active:scale-95 transition-transform"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
+                            Play Here
                           </button>
                         )}
                       </div>
-                    </div>
-                  );
-                })}
+                    ))}
+                  </div>
+                )}
               </div>
 
-              <div className="space-y-3 pt-4 border-t border-white/10">
-                <p className="text-xs font-semibold text-white/55">Linked App Permissions</p>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-white">Instagram Stories Share</span>
-                  <GlassToggle
-                    checked={linkedApps.instagramStories}
-                    onToggle={() =>
-                      setLinkedApps((p) => ({ ...p, instagramStories: !p.instagramStories }))
-                    }
-                    label="Instagram Stories integration"
-                  />
+              {/* 4. Bluetooth & Audio Outputs */}
+              <div className="liquid-glass rounded-[30px] p-5 sm:p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2.5">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-white/55">
+                      Audio Output &amp; Bluetooth
+                    </p>
+                    <p className="text-xs text-white/45 mt-0.5">
+                      Real system outputs &amp; nearby Bluetooth devices
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isScanningBluetooth}
+                      onClick={() => {
+                        void scanBluetoothDevices().then((added) => {
+                          if (added) onSelectDevice(added.id);
+                        });
+                      }}
+                      className="inline-flex min-h-[38px] items-center gap-1.5 rounded-full bg-white px-4 py-2 text-xs font-semibold text-black hover:scale-[1.02] active:scale-95 transition-transform disabled:opacity-70"
+                    >
+                      {isScanningBluetooth ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Bluetooth className="h-3.5 w-3.5" />
+                      )}
+                      <span>{isScanningBluetooth ? 'Scanning...' : 'Scan Bluetooth'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void refreshAudioOutputs()}
+                      aria-label="Refresh connected outputs"
+                      className="liquid-glass inline-flex h-[38px] w-[38px] items-center justify-center rounded-full text-white/85 hover:bg-white/14 transition-colors"
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-white">Last.fm Scrobbling</span>
-                  <GlassToggle
-                    checked={linkedApps.lastFm}
-                    onToggle={() => setLinkedApps((p) => ({ ...p, lastFm: !p.lastFm }))}
-                    label="Last.fm Scrobbling"
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-white">Sonos Direct Connect</span>
-                  <GlassToggle
-                    checked={linkedApps.sonosConnect}
-                    onToggle={() =>
-                      setLinkedApps((p) => ({ ...p, sonosConnect: !p.sonosConnect }))
-                    }
-                    label="Sonos Direct Connect"
-                  />
+
+                {scanStatus && (
+                  <p className="rounded-2xl bg-white/[0.06] border border-white/10 px-4 py-2.5 text-xs text-white/75">
+                    {scanStatus}
+                  </p>
+                )}
+
+                <div className="space-y-2.5">
+                  {audioDevices.map((device) => {
+                    const selected = device.id === activeDeviceId;
+                    const Icon =
+                      device.type === 'bluetooth'
+                        ? Bluetooth
+                        : device.type === 'headphones'
+                          ? Headphones
+                          : device.type === 'desktop'
+                            ? Laptop
+                            : device.type === 'phone'
+                              ? Smartphone
+                              : Speaker;
+                    return (
+                      <div
+                        key={device.id}
+                        className={`flex w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 transition-colors ${
+                          selected
+                            ? 'bg-white/14 border border-white/20'
+                            : 'bg-white/[0.04] border border-transparent hover:bg-white/10'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => onSelectDevice(device.id)}
+                          className="flex flex-1 min-w-0 items-center gap-3 text-left"
+                        >
+                          <Icon className="h-4.5 w-4.5 shrink-0 text-white/85" />
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-white">{device.name}</p>
+                            <p className="truncate text-xs text-white/55">{device.detail}</p>
+                          </div>
+                        </button>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {typeof device.batteryLevel === 'number' && (
+                            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-white/85 tabular-nums">
+                              {device.batteryLevel}%
+                            </span>
+                          )}
+                          {selected && <Check className="h-4 w-4 text-white" />}
+                          {device.source === 'bluetooth' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                removeBluetoothDevice(device.id);
+                                if (selected) onSelectDevice('system-default');
+                              }}
+                              aria-label={`Remove ${device.name}`}
+                              className="flex h-8 w-8 items-center justify-center rounded-full text-white/50 hover:bg-white/12 hover:text-white transition-colors"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -1539,20 +1858,6 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
 
               <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
                 <div>
-                  <p className="text-sm font-medium text-white">Dolby Atmos / Spatial Audio</p>
-                  <p className="text-xs text-white/55">Multi-dimensional spatial mix when available</p>
-                </div>
-                <GlassToggle
-                  checked={preferences.spatialEnabled}
-                  onToggle={() =>
-                    onUpdatePreferences({ spatialEnabled: !preferences.spatialEnabled })
-                  }
-                  label="Dolby Atmos Spatial Audio"
-                />
-              </div>
-
-              <div className="flex items-center justify-between gap-3 border-t border-white/10 pt-4">
-                <div>
                   <p className="text-sm font-medium text-white">
                     Normalize Volume Across Tracks
                   </p>
@@ -1570,7 +1875,7 @@ export const ProfileSettingsModal: React.FC<ProfileSettingsModalProps> = ({
           )}
 
           <p className="flex items-center justify-center gap-1.5 text-center text-[11px] text-white/40 pt-2">
-            <BrandLogo className="h-3.5 w-3.5 rounded-[4px]" />
+            <KlynLogo size={14} className="rounded-[4px]" />
             <Lock className="h-3 w-3" />
             <span>
               klyn Audio Engine · {currentUser.uid ? 'Synced to Firebase Cloud' : 'Saved locally'}

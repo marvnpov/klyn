@@ -40,7 +40,7 @@ export function generateKlynAiBlend(params: {
       ) {
         score += 28;
       }
-      if (track.quality === 'Dolby Atmos') score += 6;
+      if (track.quality === 'Hi-Res Lossless') score += 6;
       return { track, score };
     })
     .sort((a, b) => b.score - a.score)

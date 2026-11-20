@@ -1,9 +1,24 @@
 export interface LyricLine {
-  time: number; // seconds
+  time: number; // seconds (-1 when plain unsynced text)
   text: string;
 }
 
-export type TrackCategory = 'Music' | 'Spatial' | 'Mixes';
+export type TrackCategory = 'Music' | 'Mixes';
+
+export type ShuffleMode = 'off' | 'shuffle' | 'smart';
+
+export type ConnectedAppProvider = 'spotify' | 'audiomack' | 'soundcloud' | 'tunesimo';
+
+export interface ConnectedAppEntry {
+  provider: ConnectedAppProvider;
+  connected: boolean;
+  connectedAt?: string;
+  profileUrl?: string;
+  handleOrId?: string;
+  importedCount?: number;
+  lastSyncedAt?: string;
+  syncError?: string;
+}
 
 export interface Track {
   id: string;
@@ -15,24 +30,72 @@ export interface Track {
   secondaryColor: string;
   genre: string;
   category: TrackCategory;
-  quality: 'Dolby Atmos' | 'Hi-Res Lossless' | 'Lossless';
+  quality: 'Hi-Res Lossless' | 'Lossless';
   coverUrl: string;
   fallbackGradient: string;
   playlistName: string;
   year: number;
   plays: number;
+  popularity?: number;
+  explicit?: boolean;
+  previewUrl?: string;
   downloaded?: boolean;
   youtubeId?: string;
+  spotifyId?: string;
+  spotifyArtistId?: string;
+  spotifyUrl?: string;
   artistId?: number;
   collectionId?: number;
   isExternal?: boolean;
+  externalSource?: 'itunes' | 'youtube' | 'spotify' | 'audiomack' | 'soundcloud' | 'tunesimo';
+  isPodcastEpisode?: boolean;
+  isAudiobookChapter?: boolean;
+  showId?: string;
+  audioStreamUrl?: string;
   lyricsLoading?: boolean;
   lyrics: LyricLine[];
+}
+
+export type ShowKind = 'podcast' | 'audiobook';
+
+export interface ShowEpisode {
+  id: string;
+  showId: string;
+  title: string;
+  author: string;
+  description?: string;
+  duration: number;
+  releaseDate?: string;
+  audioUrl?: string;
+  coverUrl: string;
+  episodeNumber?: number;
+}
+
+export interface PodcastShow {
+  id: string;
+  title: string;
+  author: string;
+  kind: ShowKind;
+  genre: string;
+  description: string;
+  coverUrl: string;
+  feedUrl?: string;
+  episodes: ShowEpisode[];
+}
+
+export interface ShowProgressEntry {
+  showId: string;
+  episodeId: string;
+  position: number;
+  speed: number;
+  updatedAt: number;
 }
 
 export interface ArtistAlbum {
   id: string;
   collectionId?: number;
+  spotifyId?: string;
+  spotifyUrl?: string;
   title: string;
   year: number;
   type: 'Album' | 'Single' | 'EP';
@@ -43,6 +106,11 @@ export interface ArtistAlbum {
 export interface ArtistProfile {
   id: string;
   artistId?: number;
+  spotifyId?: string;
+  spotifyUrl?: string;
+  followersTotal?: number;
+  popularity?: number;
+  genres?: string[];
   name: string;
   verified: boolean;
   monthlyListeners: string;
@@ -50,11 +118,6 @@ export interface ArtistProfile {
   coverUrl: string;
   accentColor: string;
   genre: string;
-  upcomingRelease?: {
-    title: string;
-    date: string;
-    type: 'Single' | 'Album' | 'EP';
-  };
   albums: ArtistAlbum[];
 }
 
@@ -67,6 +130,8 @@ export interface PlaylistItem {
   description: string;
   trackIds: string[];
   coverUrl: string;
+  spotifyId?: string;
+  spotifyUrl?: string;
   pinned?: boolean;
   downloaded?: boolean;
   accentGradient?: string;
@@ -75,6 +140,7 @@ export interface PlaylistItem {
   isAiBlend?: boolean;
   blendMatchPct?: number;
   sharedWithFriendId?: string;
+  sourceProvider?: ConnectedAppProvider;
 }
 
 export interface LikedSongsCustomization {
@@ -86,6 +152,8 @@ export interface LikedSongsCustomization {
   showQualityBadges: boolean;
 }
 
+export type BluetoothConnectionState = 'idle' | 'scanning' | 'connecting' | 'connected';
+
 export interface AudioDevice {
   id: string;
   name: string;
@@ -95,6 +163,34 @@ export interface AudioDevice {
   sinkId?: string;
   bluetoothId?: string;
   connected?: boolean;
+  batteryLevel?: number | null;
+  batteryCharging?: boolean | null;
+}
+
+export interface BatterySnapshot {
+  supported: boolean;
+  level: number | null;
+  charging: boolean | null;
+  chargingTime: number | null;
+  dischargingTime: number | null;
+  updatedAt: number;
+}
+
+export interface AccountDeviceRecord {
+  deviceId: string;
+  name: string;
+  platform: string;
+  isCurrentDevice?: boolean;
+  isPlaying: boolean;
+  activeTrackId?: string;
+  activeTrackTitle?: string;
+  activeTrackArtist?: string;
+  playbackPosition?: number;
+  batteryLevel?: number | null;
+  batteryCharging?: boolean | null;
+  bluetoothDeviceName?: string;
+  bluetoothBatteryLevel?: number | null;
+  lastSeen: number;
 }
 
 export interface ListeningLogEntry {
@@ -115,9 +211,9 @@ export interface PlayEvent {
 
 export type ActivityPeriod = 'This Week' | '30 Days' | 'All Time';
 
-export type TopFilterTab = 'All' | 'Music' | 'Spatial' | 'Mixes';
-export type NavTab = 'Home' | 'Activity' | 'Search' | 'Library';
-export type LibrarySubTab = 'Playlists' | 'Albums' | 'Artists' | 'Downloaded';
+export type TopFilterTab = 'All' | 'Music' | 'Mixes';
+export type NavTab = 'Home' | 'Reels' | 'Search' | 'Activity' | 'Library';
+export type LibrarySubTab = 'Playlists' | 'Albums' | 'Artists' | 'Shows' | 'Downloaded';
 export type RepeatMode = 'off' | 'all' | 'one';
 export type StreamingQuality = 'Low' | 'Normal' | 'High' | 'Lossless';
 export type DownloadQuality = 'Normal' | 'High' | 'Lossless';
@@ -133,6 +229,9 @@ export interface UserPreferences {
   crossfadeSeconds: CrossfadeDuration;
   autoplaySimilar: boolean;
   autoScrollLyrics: boolean;
+  offlineMode?: boolean;
+  playbackSpeed?: number;
+  layoutMode?: 'auto' | 'desktop' | 'mobile';
   // Notifications
   notifyNewReleases: boolean;
   notifyWrappedWeekly: boolean;
@@ -199,6 +298,10 @@ export interface UserAccount {
   accentColor: string;
   favoriteGenres: string[];
   hasCompletedOnboarding: boolean;
+  notificationsEnabled?: boolean;
+  connectedApps?: Partial<Record<ConnectedAppProvider, ConnectedAppEntry>>;
+  recentSearches?: string[];
+  showProgress?: Record<string, ShowProgressEntry>;
   createdAt: string;
 }
 

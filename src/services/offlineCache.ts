@@ -1,15 +1,9 @@
 import { LyricLine, Track } from '../types/music';
 
-const OFFLINE_DB_NAME = 'klyn_offline_db_v1';
 const OFFLINE_DB_VERSION = 1;
 const TRACKS_STORE = 'tracks';
 const AUDIO_BLOBS_STORE = 'audio_blobs';
 const LYRICS_STORE = 'lyrics';
-
-const LEGACY_DB_NAME = 'klyn_offline_downloads_db';
-const LEGACY_STORE_NAME = 'downloaded_tracks';
-const DOWNLOAD_IDS_STORAGE_KEY = 'klyn_downloaded_track_ids_v1';
-const DOWNLOAD_TRACKS_FALLBACK_KEY = 'klyn_downloaded_tracks_v1';
 
 export interface OfflineTrackEntry {
   id: string;
@@ -52,8 +46,50 @@ const memoryTracksFallback = new Map<string, OfflineTrackEntry>();
 const memoryAudioFallback = new Map<string, OfflineAudioBlobEntry>();
 const memoryLyricsFallback = new Map<string, OfflineLyricsEntry>();
 
+let activeOfflineUid: string | null = null;
+let openDbInstance: IDBDatabase | null = null;
 let dbPromise: Promise<IDBDatabase | null> | null = null;
-let legacyMigrationDone = false;
+
+function sanitizeOfflineScope(uid: string | null): string {
+  const clean = (uid ?? '').trim().replace(/[^a-zA-Z0-9._-]/g, '_');
+  return clean || 'guest';
+}
+
+function getOfflineDbName(): string {
+  return `klyn_offline_db_v4_${sanitizeOfflineScope(activeOfflineUid)}`;
+}
+
+function getDownloadIdsKey(): string {
+  return `klyn_v4_${sanitizeOfflineScope(activeOfflineUid)}_downloaded_ids`;
+}
+
+function getDownloadTracksKey(): string {
+  return `klyn_v4_${sanitizeOfflineScope(activeOfflineUid)}_downloaded_tracks`;
+}
+
+export function setOfflineCacheUserScope(uid: string | null): void {
+  const normalized = uid && uid.trim() ? uid.trim() : null;
+  if (normalized === activeOfflineUid) return;
+  activeOfflineUid = normalized;
+  memoryTracksFallback.clear();
+  memoryAudioFallback.clear();
+  memoryLyricsFallback.clear();
+  if (openDbInstance) {
+    try {
+      openDbInstance.close();
+    } catch {
+      // ignore
+    }
+    openDbInstance = null;
+  }
+  dbPromise = null;
+}
+
+export function resetOfflineMemoryCaches(): void {
+  memoryTracksFallback.clear();
+  memoryAudioFallback.clear();
+  memoryLyricsFallback.clear();
+}
 
 export function formatByteSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -72,7 +108,6 @@ function estimateTrackMetadataBytes(track: Track, audioBlob?: Blob): number {
     }
   })();
   const blobBytes = audioBlob ? audioBlob.size : 0;
-  // Estimate cover art + cached track footprint cleanly when audio is streamed via YouTube IFrame ID
   const coverBytes = track.coverUrl ? 48 * 1024 : 0;
   return jsonBytes + coverBytes + blobBytes;
 }
@@ -83,9 +118,10 @@ function openOfflineDatabase(): Promise<IDBDatabase | null> {
   }
   if (dbPromise) return dbPromise;
 
+  const dbName = getOfflineDbName();
   dbPromise = new Promise<IDBDatabase | null>((resolve) => {
     try {
-      const req = window.indexedDB.open(OFFLINE_DB_NAME, OFFLINE_DB_VERSION);
+      const req = window.indexedDB.open(dbName, OFFLINE_DB_VERSION);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(TRACKS_STORE)) {
@@ -100,8 +136,10 @@ function openOfflineDatabase(): Promise<IDBDatabase | null> {
       };
       req.onsuccess = () => {
         const db = req.result;
+        openDbInstance = db;
         db.onversionchange = () => {
           db.close();
+          openDbInstance = null;
           dbPromise = null;
         };
         resolve(db);
@@ -128,11 +166,11 @@ function saveFallbackDownloadsToLocalStorage(entries: OfflineTrackEntry[]): void
   try {
     const downloadedOnly = entries.filter((e) => e.isDownloaded);
     window.localStorage.setItem(
-      DOWNLOAD_IDS_STORAGE_KEY,
+      getDownloadIdsKey(),
       JSON.stringify(downloadedOnly.map((e) => e.id)),
     );
     window.localStorage.setItem(
-      DOWNLOAD_TRACKS_FALLBACK_KEY,
+      getDownloadTracksKey(),
       JSON.stringify(
         downloadedOnly.map((e) => ({
           track: { ...e.track, downloaded: true },
@@ -148,7 +186,7 @@ function saveFallbackDownloadsToLocalStorage(entries: OfflineTrackEntry[]): void
 function loadFallbackDownloadsFromLocalStorage(): OfflineTrackEntry[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = window.localStorage.getItem(DOWNLOAD_TRACKS_FALLBACK_KEY);
+    const raw = window.localStorage.getItem(getDownloadTracksKey());
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -167,93 +205,13 @@ function loadFallbackDownloadsFromLocalStorage(): OfflineTrackEntry[] {
           hasAudioBlob: false,
           sourceUrl: cleanTrack.youtubeId
             ? `https://www.youtube.com/watch?v=${cleanTrack.youtubeId}`
-            : undefined,
+            : cleanTrack.audioStreamUrl || cleanTrack.previewUrl,
           isDownloaded: true,
         } as OfflineTrackEntry;
       })
       .filter((item): item is OfflineTrackEntry => Boolean(item));
   } catch {
     return [];
-  }
-}
-
-async function migrateLegacyDownloadsOnce(db: IDBDatabase): Promise<void> {
-  if (legacyMigrationDone || typeof window === 'undefined' || !('indexedDB' in window)) {
-    legacyMigrationDone = true;
-    return;
-  }
-  legacyMigrationDone = true;
-
-  try {
-    const legacyRecords = await new Promise<Array<{ track: Track; downloadedAt?: string }>>(
-      (resolve) => {
-        const req = window.indexedDB.open(LEGACY_DB_NAME, 1);
-        req.onsuccess = () => {
-          const legacyDb = req.result;
-          if (!legacyDb.objectStoreNames.contains(LEGACY_STORE_NAME)) {
-            legacyDb.close();
-            resolve([]);
-            return;
-          }
-          const tx = legacyDb.transaction(LEGACY_STORE_NAME, 'readonly');
-          const getAllReq = tx.objectStore(LEGACY_STORE_NAME).getAll();
-          getAllReq.onsuccess = () => {
-            legacyDb.close();
-            resolve(Array.isArray(getAllReq.result) ? getAllReq.result : []);
-          };
-          getAllReq.onerror = () => {
-            legacyDb.close();
-            resolve([]);
-          };
-        };
-        req.onerror = () => resolve([]);
-      },
-    );
-
-    const lsFallback = loadFallbackDownloadsFromLocalStorage();
-    const combined: Array<{ track: Track; cachedAt: number }> = [
-      ...legacyRecords
-        .filter((r) => Boolean(r?.track?.id))
-        .map((r) => ({
-          track: { ...r.track, downloaded: true },
-          cachedAt: r.downloadedAt ? new Date(r.downloadedAt).getTime() || Date.now() : Date.now(),
-        })),
-      ...lsFallback.map((entry) => ({
-        track: entry.track,
-        cachedAt: entry.cachedAt,
-      })),
-    ];
-
-    if (combined.length === 0) return;
-
-    await new Promise<void>((resolve) => {
-      try {
-        const tx = db.transaction(TRACKS_STORE, 'readwrite');
-        const store = tx.objectStore(TRACKS_STORE);
-        for (const item of combined) {
-          const entry: OfflineTrackEntry = {
-            id: item.track.id,
-            track: item.track,
-            coverUrl: item.track.coverUrl ?? '',
-            cachedAt: item.cachedAt,
-            updatedAt: Date.now(),
-            byteSize: estimateTrackMetadataBytes(item.track),
-            hasAudioBlob: false,
-            sourceUrl: item.track.youtubeId
-              ? `https://www.youtube.com/watch?v=${item.track.youtubeId}`
-              : undefined,
-            isDownloaded: true,
-          };
-          store.put(entry);
-        }
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  } catch {
-    // Non-fatal migration error
   }
 }
 
@@ -309,6 +267,26 @@ export async function getCachedAudioBlobEntry(
   });
 }
 
+async function fetchOfflineAudioBlobIfAvailable(track: Track): Promise<Blob | undefined> {
+  const candidateUrl = track.audioStreamUrl || track.previewUrl;
+  if (!candidateUrl || typeof fetch === 'undefined') return undefined;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(candidateUrl, { signal: controller.signal });
+    if (!res.ok) return undefined;
+    const blob = await res.blob();
+    if (blob.size > 0 && blob.size <= 35 * 1024 * 1024) {
+      return blob;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export async function cacheTrackOffline(
   track: Track,
   options?: {
@@ -333,10 +311,16 @@ export async function cacheTrackOffline(
     downloaded: resolvedIsDownloaded,
   };
 
-  const audioBlob = options?.audioBlob ?? existingAudio?.blob;
+  let audioBlob = options?.audioBlob ?? existingAudio?.blob;
+  if (resolvedIsDownloaded && !audioBlob) {
+    audioBlob = await fetchOfflineAudioBlobIfAvailable(cleanTrack);
+  }
+
   const streamUrl =
     options?.audioUrl ??
     existingAudio?.streamUrl ??
+    cleanTrack.audioStreamUrl ??
+    cleanTrack.previewUrl ??
     (mergedYoutubeId ? `https://www.youtube.com/watch?v=${mergedYoutubeId}` : undefined);
 
   const blobByteSize = audioBlob?.size ?? existingAudio?.byteSize ?? 0;
@@ -407,8 +391,6 @@ export async function getAllOfflineTrackEntries(): Promise<OfflineTrackEntry[]> 
     return Array.from(memoryTracksFallback.values()).sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  await migrateLegacyDownloadsOnce(db);
-
   return await new Promise<OfflineTrackEntry[]>((resolve) => {
     try {
       const tx = db.transaction(TRACKS_STORE, 'readonly');
@@ -438,7 +420,6 @@ export async function getDownloadedTracks(): Promise<Track[]> {
     return downloaded;
   }
 
-  // Merge localStorage fallback if IndexedDB has not been populated yet
   const lsRows = loadFallbackDownloadsFromLocalStorage();
   return lsRows.map((r) => ({ ...r.track, downloaded: true }));
 }

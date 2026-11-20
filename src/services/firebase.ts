@@ -7,6 +7,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   inMemoryPersistence,
+  sendPasswordResetEmail,
   setPersistence,
   signInWithEmailAndPassword,
   signInWithPopup,
@@ -23,80 +24,47 @@ import {
   persistentLocalCache,
   persistentMultipleTabManager,
 } from 'firebase/firestore';
-import provisionedConfig from '../../firebase-applet-config.json';
+import firebaseAppletConfig from '../../firebase-applet-config.json';
 
-interface ResolvedFirebaseConfig {
-  apiKey: string;
-  authDomain: string;
-  projectId: string;
-  storageBucket: string;
-  messagingSenderId: string;
-  appId: string;
-  firestoreDatabaseId?: string;
-}
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || firebaseAppletConfig.apiKey,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || firebaseAppletConfig.authDomain,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || firebaseAppletConfig.projectId,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || firebaseAppletConfig.storageBucket,
+  messagingSenderId:
+    import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseAppletConfig.messagingSenderId,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || firebaseAppletConfig.appId,
+};
 
-function resolveFirebaseConfig(): ResolvedFirebaseConfig | null {
-  const envApiKey = import.meta.env.VITE_FIREBASE_API_KEY?.trim();
-  const envAuthDomain = import.meta.env.VITE_FIREBASE_AUTH_DOMAIN?.trim();
-  const envProjectId = import.meta.env.VITE_FIREBASE_PROJECT_ID?.trim();
-  const envStorageBucket = import.meta.env.VITE_FIREBASE_STORAGE_BUCKET?.trim();
-  const envMessagingSenderId = import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID?.trim();
-  const envAppId = import.meta.env.VITE_FIREBASE_APP_ID?.trim();
-  const envDatabaseId = import.meta.env.VITE_FIREBASE_DATABASE_ID?.trim();
+export const FIRESTORE_DATABASE_ID =
+  firebaseAppletConfig.firestoreDatabaseId ||
+  'ai-studio-onyxflow-86efe309-feaa-4069-b3cc-1f669f1ef350';
 
-  if (envApiKey && envProjectId && envAppId) {
-    return {
-      apiKey: envApiKey,
-      authDomain: envAuthDomain || `${envProjectId}.firebaseapp.com`,
-      projectId: envProjectId,
-      storageBucket: envStorageBucket || `${envProjectId}.firebasestorage.app`,
-      messagingSenderId: envMessagingSenderId || '',
-      appId: envAppId,
-      firestoreDatabaseId:
-        envDatabaseId || provisionedConfig?.firestoreDatabaseId || undefined,
-    };
-  }
+export const isFirebaseConfigured = Boolean(
+  firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId,
+);
 
-  if (provisionedConfig?.apiKey && provisionedConfig?.projectId && provisionedConfig?.appId) {
-    return {
-      apiKey: provisionedConfig.apiKey,
-      authDomain: provisionedConfig.authDomain,
-      projectId: provisionedConfig.projectId,
-      storageBucket: provisionedConfig.storageBucket,
-      messagingSenderId: provisionedConfig.messagingSenderId,
-      appId: provisionedConfig.appId,
-      firestoreDatabaseId: provisionedConfig.firestoreDatabaseId || undefined,
-    };
-  }
-
-  return null;
-}
-
-const resolvedConfig = resolveFirebaseConfig();
-
-export const isFirebaseConfigured = Boolean(resolvedConfig);
-
-export const app: FirebaseApp | null = resolvedConfig
-  ? getApps()[0] ?? initializeApp(resolvedConfig)
+export const app: FirebaseApp | null = isFirebaseConfigured
+  ? getApps()[0] ?? initializeApp(firebaseConfig)
   : null;
 
 function initFirestoreSafely(): Firestore | null {
-  if (!app || !resolvedConfig) return null;
-  const databaseId = resolvedConfig.firestoreDatabaseId || undefined;
+  if (!app) return null;
   try {
     return initializeFirestore(
       app,
       {
         experimentalAutoDetectLongPolling: true,
+        experimentalForceLongPolling: true,
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager(),
         }),
       },
-      databaseId,
+      FIRESTORE_DATABASE_ID,
     );
   } catch {
     try {
-      return databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+      return getFirestore(app, FIRESTORE_DATABASE_ID);
     } catch {
       return null;
     }
@@ -300,6 +268,19 @@ export async function signUpWithEmailPassword(
   return result.user;
 }
 
+export async function sendPasswordReset(email: string): Promise<void> {
+  if (!auth) {
+    throw new Error('Password reset requires cloud authentication to be enabled.');
+  }
+  const clean = email.trim();
+  if (!clean || !clean.includes('@')) {
+    const err = new Error('Please enter a valid email address.') as Error & { code?: string };
+    err.code = 'auth/invalid-email';
+    throw err;
+  }
+  await sendPasswordResetEmail(auth, clean);
+}
+
 export async function signOutFirebase(): Promise<void> {
   if (!auth) return;
   try {
@@ -320,23 +301,23 @@ export function extractFirebaseErrorCode(err: unknown): string {
 
 export function formatFirebaseAuthError(
   err: unknown,
-  context: 'google' | 'email',
+  context: 'google' | 'email' | 'reset',
 ): string {
   const code = extractFirebaseErrorCode(err);
   const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
 
   if (code === 'auth/unauthorized-domain') {
-    return `Domain "${host}" is not authorized in Firebase Console → Authentication → Settings → Authorized domains. Use Email/Password below or add this host.`;
+    return `Domain "${host}" is not authorized in Firebase Console -> Authentication -> Settings -> Authorized domains.`;
   }
   if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
     return 'Google sign-in popup was closed before completing.';
   }
   if (code === 'auth/popup-blocked') {
-    return 'Popup blocked by your browser. Allow popups for klyn or sign in with Email/Password below.';
+    return 'Popup blocked by your browser. Allow popups for KLYN or sign in with Email/Password below.';
   }
   if (code === 'auth/operation-not-allowed' || code === 'auth/configuration-not-found') {
     return context === 'google'
-      ? 'Google Sign-In is not enabled in Firebase Authentication yet. Enable it in Firebase Console or use Email/Password below.'
+      ? 'Google Sign-In is not enabled in Firebase Authentication yet.'
       : 'Email/Password sign-in is not enabled in Firebase Authentication yet.';
   }
   if (code === 'auth/email-already-in-use') {
@@ -347,7 +328,9 @@ export function formatFirebaseAuthError(
     code === 'auth/wrong-password' ||
     code === 'auth/user-not-found'
   ) {
-    return 'Incorrect email or password, or account does not exist yet. Switch to Sign Up to create one.';
+    return context === 'reset'
+      ? 'If an account exists for that email, a reset link has been sent.'
+      : 'Incorrect email or password, or account does not exist yet.';
   }
   if (code === 'auth/invalid-email') {
     return 'Please enter a valid email address.';
@@ -362,7 +345,10 @@ export function formatFirebaseAuthError(
     return 'Network error contacting authentication server. Check your connection and try again.';
   }
 
+  if (context === 'reset') {
+    return 'Unable to send password reset email right now. Check your address and try again.';
+  }
   return context === 'google'
-    ? 'Unable to sign in with Google right now. You can also sign in with Email/Password below.'
+    ? 'Unable to sign in with Google right now. Try Email/Password below.'
     : 'Authentication failed. Check your details or try Continue with Google.';
 }
