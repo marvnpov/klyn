@@ -27,7 +27,7 @@ jobs:
       - name: Set up Capacitor & Android project
         run: |
           bun add -d @capacitor/core @capacitor/cli @capacitor/android
-          bunx cap init "Klyn" "com.marvnpov.klyn" --web-dir dist --non-interactive
+          bunx cap init "Klyn" "com.marvnpov.klyn" --web-dir dist
           bunx cap add android
           bunx cap sync android
 
