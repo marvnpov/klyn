@@ -27,7 +27,13 @@ jobs:
       - name: Set up Capacitor & Android project
         run: |
           bun add -d @capacitor/core @capacitor/cli @capacitor/android
-          bunx cap init "Klyn" "com.marvnpov.klyn" --web-dir dist
+          cat << 'EOF' > capacitor.config.json
+          {
+            "appId": "com.marvnpov.klyn",
+            "appName": "Klyn",
+            "webDir": "dist"
+          }
+          EOF
           bunx cap add android
           bunx cap sync android
 
