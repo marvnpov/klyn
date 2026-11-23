@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,22 +16,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies & build web app
         run: |
-          npm install
-          npm run build
+          bun install
+          bun run build
 
       - name: Set up Capacitor & Android project
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
-          npx cap init "Klyn" "com.marvnpov.klyn" --web-dir dist
-          npx cap add android
-          npx cap sync android
+          bun add -d @capacitor/core @capacitor/cli @capacitor/android
+          bunx cap init "Klyn" "com.marvnpov.klyn" --web-dir dist --non-interactive
+          bunx cap add android
+          bunx cap sync android
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -44,8 +43,9 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleDebug
 
-      - name: Create Release and Upload APK
+      - name: Upload APK to Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v1.0.0
           generate_release_notes: true
           files: android/app/build/outputs/apk/debug/*.apk
